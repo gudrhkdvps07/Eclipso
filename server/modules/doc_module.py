@@ -6,8 +6,11 @@ import tempfile
 import olefile
 from typing import List, Dict, Any, Tuple, Optional
 
+
+from server.core.redaction_rules import apply_redaction_rules
 from server.core.normalize import normalization_text, normalization_index
 from server.core.matching import find_sensitive_spans
+from server.modules import xls_module
 
 
 # ========== CONFIG ==========
@@ -111,7 +114,7 @@ def _decode_piece(chunk: bytes, fCompressed: bool) -> str:
         return chunk.decode("cp1252" if fCompressed else "utf-16le", errors="ignore")
     except Exception:
         return ""
-
+    
 
 # ─────────────────────────────
 # 텍스트 추출
@@ -274,40 +277,85 @@ def _create_new_ole_file(original_file_bytes: bytes, new_word_data: bytes) -> by
 
 
 # ─────────────────────────────
-# 전체 레닥션 프로세스
+# 차트 부분
 # ─────────────────────────────
-def redact(file_bytes: bytes) -> bytes:
-    """DOC 파일 전체 레닥션"""
+def replace_workbook_stream(original_doc: bytes, entry_path, new_data: bytes) -> bytes:
+    """OLE 파일의 특정 스트림을 교체"""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".doc") as tmp:
+        tmp.write(original_doc)
+        tmp_path = tmp.name
+    try:
+        with olefile.OleFileIO(tmp_path, write_mode=True) as ole:
+            if not ole.exists(entry_path):
+                print(f"[WARN] 교체 대상 없음: {entry_path}")
+                return original_doc
+            ole.write_stream(entry_path, new_data)
+        with open(tmp_path, "rb") as f:
+            result = f.read()
+        return result
+    finally:
+        os.remove(tmp_path)
+
+def redact_workbooks(file_bytes: bytes) -> bytes:
+    """DOC 안 ObjectPool에 포함된 Workbook 스트림을 찾아 레닥션"""
+    try:
+        with olefile.OleFileIO(io.BytesIO(file_bytes)) as ole:
+            modified = file_bytes
+            for entry in ole.listdir():
+                if (
+                    len(entry) >= 2
+                    and entry[0] == "ObjectPool"
+                    and entry[-1] in ("Workbook", "\x01Workbook")
+                ):
+                    print(f"[INFO] 발견된 Workbook 스트림: {entry}")
+                    wb_data = ole.openstream(entry).read()
+                    redacted_wb = xls_module.redact(wb_data)
+                    modified = replace_workbook_stream(modified, entry, redacted_wb)
+            return modified
+    except Exception as e:
+        print(f"[ERR] ObjectPool 워크북 처리 중 예외: {e}")
+        return file_bytes
+
+
+
+# ─────────────────────────────
+#  레닥션 프로세스
+# ─────────────────────────────
+def redact_word_document(file_bytes: bytes) -> bytes:
+    """WordDocument 스트림 레닥션"""
     try:
         data = extract_text(file_bytes)
         raw_text = data.get("raw_text", "")
         if not raw_text:
-            print("[WARN] 추출된 텍스트 없음 → 건너뜀")
             return file_bytes
 
         norm_text, index_map = normalization_index(raw_text)
         matches = find_sensitive_spans(norm_text)
-
-        # 헤더/바닥글 경계(\r\r, \n\n) 넘는 매치는 분리
-        matches = _split_cross_paragraph_matches(matches, norm_text)
-
         if not matches:
-            print("[INFO] 민감정보 없음 → 원본 반환")
             return file_bytes
+
+        matches = _split_cross_paragraph_matches(matches, norm_text)
 
         targets = []
         for s, e, val, _ in matches:
-            if s not in index_map or (e - 1) not in index_map:
-                if DEBUG:
-                    print(f"[WARN] index_map 누락: {val}")
-                continue
-            start = index_map[s]
-            end = index_map.get(e - 1, start) + 1
-            if end <= start:
-                end = start + (e - s)
-            targets.append((start, end, val))
-
+            if s in index_map and (e - 1) in index_map:
+                start = index_map[s]
+                end = index_map.get(e - 1, start) + 1
+                if end <= start:
+                    end = start + (e - s)
+                targets.append((start, end, val))
         return replace_text(file_bytes, targets)
     except Exception as e:
-        print(f"[ERR] DOC 레닥션 중 예외: {e}")
+        print(f"[ERR] WordDocument 레닥션 중 예외: {e}")
         return file_bytes
+
+
+def redact(file_bytes: bytes) -> bytes:
+    """
+    1) Word 본문 레닥션
+    2) ObjectPool 내부 Workbook 스트림 레닥션
+    3) 두 스트림 교체 후 새 DOC 반환
+    """
+    redacted_doc = redact_word_document(file_bytes)
+    redacted_doc = redact_workbooks(redacted_doc)
+    return redacted_doc
