@@ -280,21 +280,31 @@ def _create_new_ole_file(original_file_bytes: bytes, new_word_data: bytes) -> by
 # 차트 부분
 # ─────────────────────────────
 def replace_workbook_stream(original_doc: bytes, entry_path, new_data: bytes) -> bytes:
-    """OLE 파일의 특정 스트림을 교체"""
+    """ObjectPool 하위 Workbook 스트림 교체 (raw BIFF 전용)"""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".doc") as tmp:
         tmp.write(original_doc)
         tmp_path = tmp.name
+
     try:
         with olefile.OleFileIO(tmp_path, write_mode=True) as ole:
             if not ole.exists(entry_path):
                 print(f"[WARN] 교체 대상 없음: {entry_path}")
                 return original_doc
+
+            print("[INFO] Workbook 스트림이 raw BIFF 형태 → 바이트 단위로 교체")
             ole.write_stream(entry_path, new_data)
+
+        # 교체 완료된 파일 다시 읽기
         with open(tmp_path, "rb") as f:
             result = f.read()
         return result
+
+    except Exception as e:
+        print(f"[ERR] Workbook 스트림 교체 중 예외: {e}")
+        return original_doc
     finally:
         os.remove(tmp_path)
+
 
 def redact_workbooks(file_bytes: bytes) -> bytes:
     """DOC 안 ObjectPool에 포함된 Workbook 스트림을 찾아 레닥션"""
@@ -309,12 +319,39 @@ def redact_workbooks(file_bytes: bytes) -> bytes:
                 ):
                     print(f"[INFO] 발견된 Workbook 스트림: {entry}")
                     wb_data = ole.openstream(entry).read()
-                    redacted_wb = xls_module.redact(wb_data)
-                    modified = replace_workbook_stream(modified, entry, redacted_wb)
+
+                    # 무조건 BIFF8으로 가정
+                    modified_biff = _redact_biff_stream(wb_data)
+                    modified = replace_workbook_stream(modified, entry, modified_biff)
             return modified
     except Exception as e:
         print(f"[ERR] ObjectPool 워크북 처리 중 예외: {e}")
         return file_bytes
+
+
+def _redact_biff_stream(biff_bytes: bytes) -> bytes:
+    """Word 내부 ObjectPool에 포함된 raw BIFF8 Workbook 스트림 레닥션"""
+    wb = bytearray(biff_bytes)
+    off = 0
+    while off + 4 < len(wb):
+        opcode, length = struct.unpack_from("<HH", wb, off)
+        off += 4
+        payload_off = off
+        payload_end = off + length
+
+        if opcode in (0x00FC, 0x00FD, 0x0204):  # SST / LABELSST / LABEL
+            chunk = wb[payload_off:payload_end]
+            try:
+                text = chunk.decode("utf-16le", errors="ignore") or chunk.decode("cp949", errors="ignore")
+                red = apply_redaction_rules(text)
+                enc = red.encode("utf-16le")
+                wb[payload_off:payload_end] = enc[:length].ljust(length, b"\x00")
+            except Exception:
+                pass
+
+        off = payload_end
+    return bytes(wb)
+
 
 
 
