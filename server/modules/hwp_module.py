@@ -290,5 +290,25 @@ def redact(file_bytes: bytes) -> bytes:
                             _overwrite_bigfat(ole, container, entry.isectStart, new_raw)
 
                     print("prvtext 레닥션 완료!", path)
+        
+        # PrvImage
+        for path in streams:
+            if len(path) == 1:
+                name = path[0].lower()
+                if "prv" in name and "image" in name:
+                    print("[DEBUG] PrvImage detected:", path)
+
+                    raw = ole.openstream(path).read()
+
+                    # 이미지 내용 전체 삭제 (같은 크기만큼 0 채우기)
+                    new_raw = b"\x00" * len(raw)
+
+                    entry = _direntry_for(ole, path)
+                    if entry:
+                        if entry.size < cutoff:
+                            _overwrite_minifat_chain(ole, container, entry.isectStart, new_raw)
+                        else:
+                            _overwrite_bigfat(ole, container, entry.isectStart, new_raw)
+
 
     return bytes(container)
