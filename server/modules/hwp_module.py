@@ -3,10 +3,14 @@ import io, zlib, struct
 from typing import List, Tuple
 import olefile
 
+from server.core.normalize import normalization_text
 from server.core.matching import find_sensitive_spans  
 
 TAG_PARA_TEXT = 67
 
+# ─────────────────────────────
+# 압축 관련 유틸리티
+# ─────────────────────────────
 def _decompress(raw: bytes) -> Tuple[bytes, int]:
     for w in (-15, +15):
         try:
@@ -21,6 +25,11 @@ def _recompress(buf: bytes, mode: int) -> bytes:
     c = zlib.compressobj(level=9, wbits=mode)
     return c.compress(buf) + c.flush()
 
+
+# ─────────────────────────────
+# OLE 내부 구조 유틸리티
+# ─────────────────────────────
+# HWP 파일 내부에서 section 스트림 찾기 함수
 def _direntry_for(ole: olefile.OleFileIO, path: Tuple[str, ...]):
     try:
         sid_or_entry = ole._find(path)
@@ -31,6 +40,7 @@ def _direntry_for(ole: olefile.OleFileIO, path: Tuple[str, ...]):
     except Exception:
         return None
 
+# 미니스트림 오프셋 계산 (4096B 이하)
 def _collect_ministream_offsets(ole: olefile.OleFileIO) -> List[int]:
     root = getattr(ole, "root", None)
     if root is None:
@@ -40,12 +50,13 @@ def _collect_ministream_offsets(ole: olefile.OleFileIO) -> List[int]:
     s = root.isectStart
     out: List[int] = []
     while s not in (-1, olefile.ENDOFCHAIN) and 0 <= s < len(fat):
-        out.append((s + 1) * sec_size)
-        s = fat[s]
+        out.append((s + 1) * sec_size) # 헤더 사이즈때문에 + 1, 해당 섹터의 offset 계산
+        s = fat[s] # 다음 섹터로 이동
         if len(out) > 65536:
             break
     return out
 
+# FAT (4096B 이상)에 바뀐 본문 덮어쓰기
 def _overwrite_bigfat(ole: olefile.OleFileIO, container: bytearray, start_sector: int, new_raw: bytes) -> int:
     sec_size = ole.sector_size
     fat = ole.fat
@@ -60,6 +71,7 @@ def _overwrite_bigfat(ole: olefile.OleFileIO, container: bytearray, start_sector
         s = fat[s]
     return wrote
 
+# miniFAT(4096B 이하)에 바뀐 덮어쓰기
 def _overwrite_minifat_chain(ole: olefile.OleFileIO, container: bytearray, mini_start: int, new_raw: bytes) -> int:
     ole.loadminifat()
     mini_size = ole.mini_sector_size
@@ -85,6 +97,12 @@ def _overwrite_minifat_chain(ole: olefile.OleFileIO, container: bytearray, mini_
             break
     return wrote
 
+
+# ─────────────────────────────
+# 문자 추출 관련 함수
+# ─────────────────────────────
+
+# 파라미터 반복자
 def _iter_para_text_records(section_dec: bytes):
     off, n = 0, len(section_dec)
     while off + 4 <= n:
@@ -115,6 +133,7 @@ def extract_text(file_bytes: bytes) -> dict:
     full = "\n".join(texts)
     return {"full_text": full, "pages": [{"page": 1, "text": full}]}
 
+# 정규식에 걸리는 문자열 collect
 def _collect_targets_by_regex(text: str) -> List[str]:
     res = find_sensitive_spans(text) 
     targets: List[str] = []
@@ -126,6 +145,7 @@ def _collect_targets_by_regex(text: str) -> List[str]:
     targets = sorted(set(targets), key=lambda x: (-len(x), x))
     return targets
 
+# ParaText 전용 인코딩 함수 (utf-16 고정)
 def _replace_utf16le_keep_len(buf: bytes, t: str) -> Tuple[bytes, int]:
     if not t:
         return buf, 0
@@ -136,6 +156,7 @@ def _replace_utf16le_keep_len(buf: bytes, t: str) -> Tuple[bytes, int]:
         buf = buf.replace(pat, rep)
     return buf, count
 
+# BinData 내부 전용 인코딩 함수
 def _replace_in_bindata(raw: bytes, t: str) -> Tuple[bytes, int]:
     total = 0
     out = raw
@@ -153,10 +174,13 @@ def _replace_in_bindata(raw: bytes, t: str) -> Tuple[bytes, int]:
             pass
     return out, total
 
+
+# main 레닥션 함수
 def redact(file_bytes: bytes) -> bytes:
     container = bytearray(file_bytes)
-    full = extract_text(file_bytes)["full_text"]
-    targets = _collect_targets_by_regex(full) 
+    full_raw = extract_text(file_bytes)["full_text"]
+    full_norm = normalization_text(full_raw)
+    targets = _collect_targets_by_regex(full_norm) 
 
     with olefile.OleFileIO(io.BytesIO(file_bytes)) as ole:
         streams = ole.listdir(streams=True, storages=False)
