@@ -25,7 +25,6 @@ def MAKE_4CHID(a, b, c, d) -> int:
 CTRLID_OLE = MAKE_4CHID(ord('$'), ord('o'), ord('l'), ord('e'))
 
 
-
 # ─────────────────────────────
 # 압축 관련 유틸리티
 # ─────────────────────────────
@@ -200,7 +199,7 @@ def parse_bindata_id_from_ctrldata(payload: bytes) -> Optional[int]:
 
 
 # $ole 컨트롤 기반 BinDataID 탐색
-def discover_ole_bindata_ids_strict(section_bytes: bytes) -> List[int]:
+def discover_ole_ids(section_bytes: bytes) -> List[int]:
     ids: List[int] = []
     pending: Optional[int] = None
 
@@ -217,6 +216,40 @@ def discover_ole_bindata_ids_strict(section_bytes: bytes) -> List[int]:
                 pending = None
 
     return ids
+
+# ─────────────────────────────
+# 이미지 추출
+# ─────────────────────────────
+IMAGE_EXTS = (".bmp", ".gif", ".jpg", ".jpeg",".pcx", ".pic", ".png", ".tif", ".tiff")
+
+def extract_bindata_images(file_bytes: bytes) -> list[dict]:
+    results = []
+
+    with olefile.OleFileIO(io.BytesIO(file_bytes)) as ole:
+        for path in ole.listdir(streams=True, storages=False):
+            if len(path) != 2 or path[0] != "BinData":
+                continue
+
+            name = path[1]
+            lower = name.lower()
+
+            if not lower.endswith(IMAGE_EXTS):
+                continue
+
+            try:
+                raw = ole.openstream(path).read()
+            except Exception:
+                continue
+
+            results.append({
+                "stream_path": tuple(path),
+                "filename": name,
+                "ext": lower[lower.rfind("."):],
+                "bytes": raw,
+            })
+
+    return results
+
 
 
 # ─────────────────────────────
@@ -303,7 +336,7 @@ def try_patterns(blob: bytes, text: str, max_log: int = 0):
 
 
 # ─────────────────────────────
-# BinData 처리
+# BinData - OLE 처리
 # ─────────────────────────────
 CFB = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"
 PNG = b"\x89PNG\r\n\x1a\n"
@@ -489,48 +522,47 @@ def redact(file_bytes: bytes) -> bytes:
                 else:
                     _overwrite_bigfat(ole, container, entry.isectStart, new_raw)
 
-        # ─────────────────────────────
-        # BinData 처리
-        # ─────────────────────────────
-
-        bindata_paths = [
+    # BinData 처리
+        # OLE
+        oledata_paths = [
             tuple(p) for p in streams
             if len(p) >= 2 and p[0] == "BinData" and p[1].endswith(".OLE")
         ]
 
-        print(f"[DBG][BinData] found {len(bindata_paths)} streams")
-        for path in bindata_paths:
-            print(f"\n[DBG][BinData] === processing {path} ===")
-
+        for path in oledata_paths:
             try:
                 raw = ole.openstream(path).read()
             except Exception as e:
-                print(f"[DBG][BinData] read failed: {e}")
+                print(f"[BinData] read failed: {e}")
                 continue
-
-            print(f"[DBG][BinData] original size={len(raw)}")
 
             rep, hit = _replace_in_bindata_smart(raw)
 
             if hit <= 0:
-                print("[DBG][BinData] no hits → skip overwrite")
                 continue
 
             if len(rep) != len(raw):
-                print("[DBG][BinData][ERROR] size changed → skip overwrite")
                 continue
 
             entry = _direntry_for(ole, path)
             if not entry:
-                print("[DBG][BinData] no direntry → skip")
                 continue
 
             if entry.size < cutoff:
                 _overwrite_minifat_chain(ole, container, entry.isectStart, rep)
-                print("[DBG][BinData] written via MiniFAT")
             else:
                 _overwrite_bigfat(ole, container, entry.isectStart, rep)
-                print("[DBG][BinData] written via BigFAT")
+        
+        # Image
+        image_infos = extract_bindata_images(file_bytes)
+
+        print(f"[DBG][Image] found {len(image_infos)} image streams")
+        for img in image_infos:
+            print(
+                f"[DBG][Image] {img['filename']} "
+                f"({img['ext']}, {len(img['bytes'])} bytes)"
+            )
+
 
         # 3) PrvText / PrvImage
         for path in streams:
