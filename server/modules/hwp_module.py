@@ -564,7 +564,7 @@ def redact(file_bytes: bytes) -> bytes:
             )
 
 
-        # 3) PrvText / PrvImage
+        # Prview
         for path in streams:
             if len(path) == 1:
                 name = path[0].lower()
