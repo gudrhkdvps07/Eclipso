@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import io
 import os
 import time
@@ -26,7 +27,8 @@ ENDOFCHAIN = 0xFFFFFFFE
 MINI_CUTOFF_DEFAULT = 4096
 HEAD_PREVIEW_BYTES = 96
 
-DEBUG_IMAGES = True
+# 이미지 시그니처 디버그 플래그
+DEBUG_IMAGES = os.getenv("OLE_DEBUG_IMAGES", "0") in ("1", "true", "TRUE")
 
 
 def _hexdump(b: bytes, width: int = 16) -> str:
@@ -121,11 +123,6 @@ _ASCII_EMAIL_DOTOK = set(
 
 
 def _scan_image_signatures(raw: bytes, max_hits: int = 32):
-    """
-    스트림 바이트에서 대표적인 이미지 포맷 시그니처를 찾아
-    (label, offset) 리스트로 반환.
-    디버그용 substring 검색.
-    """
     hits: List[Tuple[str, int]] = []
 
     def _scan(sig: bytes, label: str):
@@ -307,16 +304,7 @@ def _brute_bigfat_aligned(
         if off + len(sig) > len(container):
             break
         if container[off : off + len(sig)] == sig:
-            log.info(
-                "    · BigFAT 브루트포스(정렬) 일치: start=%d (K<=%d)", s, K
-            )
             return s
-    log.info(
-        "    · BigFAT 브루트포스(정렬) 실패: sig=%dB K=%d sector=%d",
-        len(sig),
-        K,
-        sector,
-    )
     return None
 
 
@@ -326,19 +314,9 @@ def _brute_bigfat_unaligned(
     limit = min(len(container), window)
     hit = container.find(sig, sector)
     if hit == -1 or hit > limit:
-        log.info(
-            "    · BigFAT 브루트포스(비정렬) 실패: first_hit=%s limit=%d",
-            hit,
-            limit,
-        )
         return None
     s = (hit // sector) - 1
     if s >= 0:
-        log.info(
-            "    · BigFAT 브루트포스(비정렬) 근사 일치: start~=%d (file_off=%d)",
-            s,
-            hit,
-        )
         return s
     return None
 
@@ -348,7 +326,6 @@ def _brute_ministream(
 ) -> Optional[int]:
     root = get_root_entry(ole)
     if not root:
-        log.info("    · MiniStream 브루트포스 실패: Root Entry 없음")
         return None
     sec_size = ole.sector_size
     fat = ole.fat
@@ -366,18 +343,8 @@ def _brute_ministream(
     sig = stream_bytes[: min(64, len(stream_bytes))]
     idx = mini_stream.find(sig)
     if idx == -1:
-        log.info(
-            "    · MiniStream 브루트포스 실패: signature not found (sig=%dB, len=%d)",
-            len(sig),
-            len(mini_stream),
-        )
         return None
     mini_start = idx // ole.mini_sector_size
-    log.info(
-        "    · MiniStream 브루트포스 일치: mini_start=%d (byte_off=%d)",
-        mini_start,
-        idx,
-    )
     return mini_start
 
 
@@ -391,7 +358,6 @@ def _probe_set(secrets: List[str]) -> Dict[str, List[bytes]]:
 def redact_ole_bin_preserve_size(
     bin_bytes: bytes, secrets: List[str], *, mask_preview: bool = False
 ) -> bytes:
-
     if not isinstance(bin_bytes, (bytes, bytearray, memoryview)) or len(bin_bytes) < 8:
         return bytes(bin_bytes)
 
@@ -402,11 +368,6 @@ def redact_ole_bin_preserve_size(
         if idx < 0:
             return bytes(bin_bytes)  # CFBF 아님
         prefix_off = idx
-        log.info(
-            "BinData: CFBF 시그니처가 오프셋 %d에서 시작 (prefix=%s)",
-            idx,
-            _hexdump(bytes(bin_bytes)[:idx], 8),
-        )
 
     container = bytearray(bin_bytes)  # 수정 가능한 버퍼
     base = memoryview(container)[prefix_off:]
@@ -419,13 +380,6 @@ def redact_ole_bin_preserve_size(
         mini = ole.mini_sector_size
         cutoff = getattr(ole, "minisector_cutoff", MINI_CUTOFF_DEFAULT)
         streams = ole.listdir(streams=True, storages=False)
-        log.info(
-            "OLE 열림: streams=%d, sector=%d, mini=%d, cutoff=%d",
-            len(streams),
-            sector,
-            mini,
-            cutoff,
-        )
 
         env_preview = os.getenv("OLE_MASK_PREVIEW", "0") in ("1", "true", "TRUE")
         force_blank_preview = mask_preview or env_preview
@@ -457,20 +411,8 @@ def redact_ole_bin_preserve_size(
                 de_start = getattr(de, "isectStart", -1)
                 de_size = getattr(de, "size", de_size)
                 is_mini = de_size < cutoff
-                log.info(
-                    "  · %s direntry: start=%d size=%d mini=%s",
-                    sname,
-                    de_start,
-                    de_size,
-                    is_mini,
-                )
             except Exception:
-                log.info(
-                    "  · %s direntry: <unavailable> (size=%d mini=%s)",
-                    sname,
-                    de_size,
-                    is_mini,
-                )
+                pass
 
             # 이미지 시그니처 디버그: 스트림 내부에서 JPEG/PNG 등 offset 표시
             if DEBUG_IMAGES and sname in ("Pictures", "PowerPoint Document"):
@@ -516,15 +458,6 @@ def redact_ole_bin_preserve_size(
                 g_ascii += g1
                 changed, g2 = _mask_emails_utf16le_same_len(changed)
                 g_u16 += g2
-                if any((u16_hits, ascii_hits, g_ascii, g_u16)):
-                    log.info(
-                        "  · %s PIPELINE: u16=%d ascii=%d gen_ascii=%d gen_u16=%d",
-                        sname,
-                        u16_hits,
-                        ascii_hits,
-                        g_ascii,
-                        g_u16,
-                    )
 
             if changed == orig:
                 continue
@@ -558,7 +491,9 @@ def redact_ole_bin_preserve_size(
             # (3) 비정렬 근사
             if wrote <= 0:
                 sig = orig[: min(64, len(orig))]
-                bf2 = _brute_bigfat_unaligned(base.obj, sig, sector, window=2 * 1024 * 1024)
+                bf2 = _brute_bigfat_unaligned(
+                    base.obj, sig, sector, window=2 * 1024 * 1024
+                )
                 if bf2 is not None:
                     wrote = overwrite_bigfat(ole, base.obj, bf2, changed)
                     start_used = f"BigFAT(brute-unaligned:{bf2})"
@@ -567,19 +502,13 @@ def redact_ole_bin_preserve_size(
             if wrote <= 0:
                 mini_start = _brute_ministream(ole, base.obj, orig)
                 if mini_start is not None:
-                    wrote = overwrite_minifat_chain(ole, base.obj, mini_start, changed)
+                    wrote = overwrite_minifat_chain(
+                        ole, base.obj, mini_start, changed
+                    )
                     start_used = f"MiniFAT(brute:{mini_start})"
 
             if wrote <= 0:
                 log.error("  · %s WRITE 스킵/실패 (start=%s)", sname, de_start)
-            else:
-                log.info(
-                    "  · %s WRITE ok via %s (size=%d%s)",
-                    sname,
-                    start_used,
-                    len(changed),
-                    ", forced_blank" if did_force_blank else "",
-                )
 
             # 재검증
             try:
@@ -597,7 +526,6 @@ def redact_ole_bin_preserve_size(
                             _dump_text(rb2[:HEAD_PREVIEW_BYTES], HEAD_PREVIEW_BYTES),
                         )
                     else:
-                        log.info("  · %s VERIFY OK (제로필)", sname)
                         changed_any = True
                 else:
                     remain = 0
@@ -616,7 +544,6 @@ def redact_ole_bin_preserve_size(
                             head,
                         )
                     else:
-                        log.info("  · %s VERIFY OK", sname)
                         changed_any = True
             except Exception as e:
                 log.warning("  · %s VERIFY 예외: %s", sname, e)
@@ -624,10 +551,6 @@ def redact_ole_bin_preserve_size(
     if dump_dir:
         (dump_dir / "ole_after.bin").write_bytes(base.tobytes())
 
-    if changed_any:
-        log.info("OLE 처리 완료: 일부 스트림 변경됨 (prefix=%d)", prefix_off)
-    else:
-        log.warning("OLE 처리 완료: 변경된 스트림 없음")
     return bytes(container)
 
 
