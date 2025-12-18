@@ -48,7 +48,6 @@ NER_SCORE_THRESHOLD = float(os.getenv("NER_SCORE_THRESHOLD", "0.0"))
 
 NER_MASK_MARKDOWN = os.getenv("NER_MASK_MARKDOWN", "1") == "1"
 NER_LOG_MAX_CHARS = int(os.getenv("NER_LOG_MAX_CHARS", "20000"))
-
 NER_SOFT_GAP_MAX = int(os.getenv("NER_SOFT_GAP_MAX", "8"))
 
 
@@ -461,10 +460,8 @@ def _infer_entities_no_text(
     n = len(text)
     ranges = _coerce_ranges(exclude_spans, n) if exclude_spans else []
     masked = _mask_text(text, ranges) if ranges else text
-
     ner_input = _mask_markdown_noise_keep_len(masked) if NER_MASK_MARKDOWN else masked
     ner_input = _mask_hangul_suffix_digits_keep_len(ner_input)
-
     _log_ner_input_text(ner_input)
 
     o_id: Optional[int] = None
@@ -472,7 +469,7 @@ def _infer_entities_no_text(
         o_id = label2id.get("O")
     elif "LABEL_0" in label2id:
         o_id = label2id.get("LABEL_0")
-
+ 
     def _id_to_label(i: int) -> str:
         v = id2label.get(int(i))
         return str(v) if v is not None else str(i)

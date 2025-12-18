@@ -90,7 +90,7 @@ async def redact_file(
 
     try:
         if ext == ".pdf":
-            plain_result = pdf_module.extract_text(file_bytes) or {}
+            plain_result = pdf_module.extract_text_indexed(file_bytes) or {}
             plain_text = str(plain_result.get("full_text") or "")
             if not plain_text.strip():
                 raise HTTPException(400, "PDF plain text가 비어 있습니다.")
@@ -190,7 +190,7 @@ async def redact_file(
                     if ed <= s:
                         continue
 
-                    lab = str(e.get("label") or "").upper()
+                    lab = str(e.get("label") or e.get("entity_group") or e.get("entity") or "").upper()
                     if allowed_set is not None and lab and lab not in allowed_set:
                         continue
 

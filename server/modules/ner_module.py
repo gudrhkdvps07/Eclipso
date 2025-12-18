@@ -9,21 +9,21 @@ logger = logging.getLogger(__name__)
 def _chunk_text(
     text: str,
     chunk_size: int = 1500,
-    overlap: int = 200, 
+    overlap: int = 200,
 ) -> List[Tuple[int, int, str]]:
     n = len(text)
     if n <= 0:
         return []
-    if overlap < 0:
-        overlap = 0
-    if overlap >= chunk_size:
-        overlap = max(0, chunk_size // 5)
+
+    chunk_size = max(1, int(chunk_size))
+    overlap = max(0, int(overlap))
 
     chunks: List[Tuple[int, int, str]] = []
     i = 0
     while i < n:
         j = min(n, i + chunk_size)
 
+        # 가능한 경우 단어/줄 경계를 기준으로 쪼갬(문맥 유지)
         if j < n:
             back = text.rfind("\n", i, j)
             if back != -1 and (j - back) <= 80:
@@ -40,8 +40,8 @@ def _chunk_text(
     return chunks
 
 
-def _coerce_spans(exclude_spans: Optional[List[Dict[str, Any]]], n: int) -> List[Tuple[int, int]]:
-    if not exclude_spans or n <= 0:
+def _coerce_spans(exclude_spans: Optional[List[Dict[str, Any]]]) -> List[Tuple[int, int]]:
+    if not exclude_spans:
         return []
     out: List[Tuple[int, int]] = []
     for sp in exclude_spans:
@@ -56,12 +56,6 @@ def _coerce_spans(exclude_spans: Optional[List[Dict[str, Any]]], n: int) -> List
             e = int(e)
         except Exception:
             continue
-        if e <= s:
-            continue
-        if s < 0:
-            s = 0
-        if e > n:
-            e = n
         if e <= s:
             continue
         out.append((s, e))
@@ -79,40 +73,32 @@ def _coerce_spans(exclude_spans: Optional[List[Dict[str, Any]]], n: int) -> List
     return merged
 
 
-def _overlap(a: Tuple[int, int], b: Tuple[int, int]) -> bool:
-    return min(a[1], b[1]) - max(a[0], b[0]) > 0
+_MD_TABLE_RE = re.compile(r"^\s*\|.*\|\s*$")
+_MD_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$")
 
 
-_LABEL_MAP = {
-    "PS": "PS",
-    "PERSON": "PS",
-    "PER": "PS",
-    "B-PER": "PS",
-    "I-PER": "PS",
-    "OG": "OG",
-    "ORG": "OG",
-    "ORGANIZATION": "OG",
-    "B-ORG": "OG",
-    "I-ORG": "OG",
-    "LC": "LC",
-    "LOCATION": "LC",
-    "LOC": "LC",
-    "ADDRESS": "LC",
-    "GPE": "LC",
-    "B-LOC": "LC",
-    "I-LOC": "LC",
-    "DT": "DT",
-    "DATE": "DT",
-    "TIME": "DT",
-    "DATETIME": "DT",
-}
+def _mask_markdown_keep_len(text: str) -> str:
+    """
+    마크다운 테이블/구분선/헤더 구분선을 길이 유지 방식으로 무력화한다.
+    (오프셋 안정성 유지 목적)
+    """
+    if not isinstance(text, str) or not text:
+        return text
 
-
-def _std_label(label: str) -> str:
-    key = (label or "").strip().upper()
-    if key.startswith("B-") or key.startswith("I-"):
-        key = key[2:]
-    return _LABEL_MAP.get(key, key)
+    lines = text.splitlines(True)  # keepends
+    out: List[str] = []
+    for ln in lines:
+        raw = ln.rstrip("\r\n")
+        if _MD_SEP_RE.match(raw) or _MD_TABLE_RE.match(raw):
+            # 길이 유지: 개행 제외하고 공백으로 치환
+            core = list(raw)
+            for i, ch in enumerate(core):
+                if ch != "\n":
+                    core[i] = " "
+            out.append("".join(core) + (ln[len(raw):] if len(ln) > len(raw) else ""))
+        else:
+            out.append(ln)
+    return "".join(out)
 
 
 def _normalize_pipeline_entities(
@@ -125,7 +111,8 @@ def _normalize_pipeline_entities(
         return []
 
     out: List[Dict[str, Any]] = []
-    used: List[Tuple[int, int]] = []
+    # 중복 제거는 라벨별로만 수행(라벨이 다르면 유지)
+    used_by_label: Dict[str, List[Tuple[int, int]]] = {}
 
     def _overlap(a: Tuple[int, int], b: Tuple[int, int]) -> bool:
         return min(a[1], b[1]) - max(a[0], b[0]) > 0
@@ -144,9 +131,12 @@ def _normalize_pipeline_entities(
         )
         if not lab:
             continue
-        lab = str(lab)
+
+        # 라벨 정규화: BIO 제거 + 공백 제거 + 대문자
+        lab = str(lab).strip()
         if lab.startswith("B-") or lab.startswith("I-"):
             lab = lab[2:]
+        lab = lab.strip().upper()
 
         if allowed_set is not None and lab not in allowed_set:
             continue
@@ -171,7 +161,8 @@ def _normalize_pipeline_entities(
         s = chunk_start + s_local
         t = chunk_start + t_local
 
-        if any(_overlap((s, t), r) for r in used):
+        used_list = used_by_label.setdefault(lab, [])
+        if any(_overlap((s, t), r) for r in used_list):
             continue
 
         score = e.get("score")
@@ -190,13 +181,12 @@ def _normalize_pipeline_entities(
                 "text": chunk_text[s_local:t_local],
             }
         )
-        used.append((s, t))
+        used_list.append((s, t))
 
     return out
 
 
-
-def _merge_spans(spans: List[Dict[str, Any]], gap: int = 1) -> List[Dict[str, Any]]:
+def _merge_spans(spans: List[Dict[str, Any]], gap: int = 0) -> List[Dict[str, Any]]:
     if not spans:
         return []
     spans = sorted(spans, key=lambda x: (str(x.get("label", "")), int(x.get("start", 0)), int(x.get("end", 0))))
@@ -210,35 +200,37 @@ def _merge_spans(spans: List[Dict[str, Any]], gap: int = 1) -> List[Dict[str, An
             continue
 
         if not merged:
-            merged.append(dict(sp))
+            merged.append({**sp, "label": lab, "start": s, "end": e})
             continue
 
         last = merged[-1]
-        llab = str(last.get("label", ""))
-        ls = int(last.get("start", 0) or 0)
-        le = int(last.get("end", 0) or 0)
+        if str(last.get("label", "")) != lab:
+            merged.append({**sp, "label": lab, "start": s, "end": e})
+            continue
 
-        if lab == llab and s <= le + gap:
-            last["end"] = max(le, e)
-            # score는 max로 유지(없으면 보수적으로 처리)
-            try:
-                last_score = float(last.get("score")) if last.get("score") is not None else None
-            except Exception:
-                last_score = None
-            try:
-                cur_score = float(sp.get("score")) if sp.get("score") is not None else None
-            except Exception:
-                cur_score = None
-            if last_score is None:
-                last["score"] = cur_score
-            elif cur_score is not None:
-                last["score"] = max(last_score, cur_score)
-        else:
-            merged.append(dict(sp))
+        last_s = int(last.get("start", 0) or 0)
+        last_e = int(last.get("end", 0) or 0)
 
-    # label별 정렬이므로 최종은 start 기준으로 한 번 더 정렬
-    merged.sort(key=lambda x: (int(x.get("start", 0) or 0), int(x.get("end", 0) or 0)))
+        if s <= last_e:
+            last["end"] = max(last_e, e)
+            try:
+                last["score"] = max(float(last.get("score") or 0.0), float(sp.get("score") or 0.0))
+            except Exception:
+                pass
+            continue
+
+        if gap > 0 and s <= last_e + gap:
+            last["end"] = max(last_e, e)
+            try:
+                last["score"] = max(float(last.get("score") or 0.0), float(sp.get("score") or 0.0))
+            except Exception:
+                pass
+            continue
+
+        merged.append({**sp, "label": lab, "start": s, "end": e})
+
     return merged
+
 
 def run_ner(
     text: str,
@@ -258,7 +250,10 @@ def run_ner(
                 s = int(s); e = int(e)
             except Exception:
                 continue
-            s = max(0, min(n, s)); e = max(0, min(n, e))
+            if e <= s:
+                continue
+            s = max(0, min(n, s))
+            e = max(0, min(n, e))
             if e <= s:
                 continue
             for i in range(s, e):
@@ -266,25 +261,31 @@ def run_ner(
                     chars[i] = " "
         text = "".join(chars)
 
+    if bool(policy.get("mask_markdown", False)):
+        text = _mask_markdown_keep_len(text)
+
     chunk_size = int(policy.get("chunk_size", 1500))
     overlap = int(policy.get("chunk_overlap", 50))
     allowed = policy.get("allowed_labels", None)
-    allow_set = set(map(str, allowed)) if isinstance(allowed, list) else None
+    allow_set = {str(x).strip().upper() for x in allowed} if isinstance(allowed, list) else None
 
     spans: List[Dict[str, Any]] = []
 
     for s, t, sub in _chunk_text(text, chunk_size=chunk_size, overlap=overlap):
         try:
-            raw = ner_predict_local(sub)
+            raw = ner_predict_local(sub, labels=sorted(allow_set) if allow_set else None)
             chunk_spans = _normalize_pipeline_entities(raw, s, sub, allowed_set=allow_set)
-            if allow_set is not None:
-                chunk_spans = [sp for sp in chunk_spans if sp.get("label") in allow_set]
             spans.extend(chunk_spans)
-        except Exception:
+        except Exception as ex:
+            logger.warning(
+                "[NER] chunk inference failed start=%d end=%d len=%d err=%s",
+                s, t, len(sub), ex,
+                exc_info=True,
+            )
             continue
 
     # overlap 청크 때문에 생기는 중복/분절 병합(핵심)
-    merge_gap = int(policy.get("merge_gap", 1))
+    merge_gap = int(policy.get("merge_gap", 0))
     spans = _merge_spans(spans, gap=merge_gap)
 
     spans.sort(key=lambda x: (x["start"], x["end"]))
@@ -321,32 +322,31 @@ def compute_span_metrics(
         "overall_precision": overall_precision,
         "overall_recall": overall_recall,
         "overall_f1": overall_f1,
-        "overall_miss_rate": 1.0 - overall_recall,
-        "by_label": {},
     }
 
+    per_label: Dict[str, Any] = {}
     for lab in label_list:
-        g = set(k for k in gold if k[0] == lab)
-        p = set(k for k in pred if k[0] == lab)
+        g = set(_span_key(s) for s in gold_spans if str(s.get("label")) == lab)
+        p = set(_span_key(s) for s in pred_spans if str(s.get("label")) == lab)
+
         tp_l = len(g & p)
         fn_l = len(g - p)
         fp_l = len(p - g)
 
         recall = tp_l / (tp_l + fn_l) if (tp_l + fn_l) > 0 else 1.0
         precision = tp_l / (tp_l + fp_l) if (tp_l + fp_l) > 0 else 1.0
-        f1 = (
-            2 * precision * recall / (precision + recall)
-            if (precision + recall) > 0
-            else 0.0
-        )
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
 
-        out["by_label"][lab] = {
+        per_label[lab] = {
             "precision": precision,
             "recall": recall,
             "f1": f1,
-            "miss_rate": 1.0 - recall,
+            "tp": tp_l,
+            "fp": fp_l,
+            "fn": fn_l,
         }
 
+    out["per_label"] = per_label
     out["sensitive_protection_index"] = overall_recall
     return out
 
@@ -362,27 +362,34 @@ def compute_document_level_metrics(
     have_gold_doc_cnt_by_label: Dict[str, int] = {}
 
     for d in docs:
-        gold = d.get("gold_spans", []) or []
-        pred = d.get("pred_spans", []) or []
+        gold = d.get("gold_spans") or []
+        pred = d.get("pred_spans") or []
 
-        m = compute_span_metrics(gold, pred, labels=labels)
-        per_doc.append({"id": d.get("id"), "metrics": m})
-        gold_set = set(_span_key(s) for s in gold)
-        pred_set = set(_span_key(s) for s in pred)
-        if gold_set.issubset(pred_set):
+        gold_labels = {str(s.get("label")) for s in gold if s.get("label")}
+        pred_labels = {str(s.get("label")) for s in pred if s.get("label")}
+
+        if labels is not None:
+            gold_labels = {x for x in gold_labels if x in labels}
+            pred_labels = {x for x in pred_labels if x in labels}
+
+        missing = sorted(list(gold_labels - pred_labels))
+        ok = len(missing) == 0
+        if ok:
             complete_cnt += 1
+        else:
+            for lab in missing:
+                miss_doc_cnt_by_label[lab] = miss_doc_cnt_by_label.get(lab, 0) + 1
 
-        labs = labels or sorted({str(s.get("label")) for s in gold if s.get("label")})
-        for lab in labs:
-            gold_lab = [s for s in gold if str(s.get("label")) == lab]
-            if not gold_lab:
-                continue
+        for lab in gold_labels:
             have_gold_doc_cnt_by_label[lab] = have_gold_doc_cnt_by_label.get(lab, 0) + 1
 
-            gold_lab_set = set(_span_key(s) for s in gold_lab)
-            pred_lab_set = set(k for k in pred_set if k[0] == lab)
-            if not gold_lab_set.issubset(pred_lab_set):
-                miss_doc_cnt_by_label[lab] = miss_doc_cnt_by_label.get(lab, 0) + 1
+        per_doc.append(
+            {
+                "id": d.get("id"),
+                "complete": ok,
+                "missing_labels": missing,
+            }
+        )
 
     n = len(docs)
     complete_rate = complete_cnt / n if n else 0.0

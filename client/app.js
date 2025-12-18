@@ -6,6 +6,7 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel))
 
 let __lastRedactedBlob = null
 let __lastRedactedName = 'redacted.bin'
+let __lastNerEntities = []
 
 const esc = (s) =>
   (s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -416,32 +417,32 @@ function joinBrokenLines(text) {
 function normalizeNerItems(raw) {
   if (!raw) return { items: [] }
 
-  // 서버가 준 그대로
   if (Array.isArray(raw.entities)) {
     return { items: raw.entities }
   }
 
-  // (혹시 다른 형태로 올 경우에만 최소 호환)
   if (Array.isArray(raw.items)) return { items: raw.items }
   if (Array.isArray(raw)) return { items: raw }
 
   return { items: [] }
 }
-
-async function requestNerSmart(text, exclude_spans) {
+async function requestNerSmart(text, exclude_spans, debug = false) {
   const labels = selectedNerLabels()
-  const payload = { text }
-  if (labels.length) payload.labels = labels
-  if (Array.isArray(exclude_spans) && exclude_spans.length)
-    payload.exclude_spans = exclude_spans
+
+  const bodyObj = {
+    text: String(text || ''),
+    labels: labels,
+    exclude_spans: Array.isArray(exclude_spans) ? exclude_spans : [],
+    debug: !!debug,
+  }
 
   try {
-    // fetch()는 Promise를 반환하고 Response를 받는다. :contentReference[oaicite:1]{index=1}
     const r2 = await fetch(`${API_BASE()}/ner/predict`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(bodyObj),
     })
+
     if (!r2.ok) {
       const txt = await r2.text()
       console.error('NER 요청 실패', r2.status, txt)
@@ -449,10 +450,7 @@ async function requestNerSmart(text, exclude_spans) {
       return { items: [] }
     }
 
-    // Response에서 JSON을 읽을 때 json()을 사용한다. :contentReference[oaicite:2]{index=2}
     const j2 = await r2.json()
-
-    // ✅ 프론트 계산 없이 서버 entities만 그대로
     return normalizeNerItems(j2)
   } catch (e) {
     console.error('NER 요청 중 오류', e)
@@ -678,6 +676,8 @@ $('#btn-scan')?.addEventListener('click', async () => {
     const tablePreviewRoot = $('#text-table-preview')
     if (tablePreviewRoot) tablePreviewRoot.innerHTML = ''
 
+    // PDF일 때 마크다운은 "미리보기/UI" 용으로만 쓰고,
+    // 정규식/NER/레닥션 기준 텍스트는 /text/extract 의 full_text(인덱스 텍스트)로 고정한다.
     if (ext === 'pdf') {
       try {
         const fd2 = new FormData()
@@ -695,10 +695,9 @@ $('#btn-scan')?.addEventListener('click', async () => {
           else if (Array.isArray(mdData.pages))
             markdown = mdData.pages.map((p) => p.markdown || '').join('\n\n')
 
-          if (markdown.trim()) analysisText = markdown
-
           const tableCount = renderTablePreview(markdown)
 
+          // textarea는 보기 편하게 markdown 기반 plain preview를 보여줄 수 있음
           const ta2 = $('#txt-out')
           if (ta2) {
             if (tableCount > 0) {
@@ -707,8 +706,7 @@ $('#btn-scan')?.addEventListener('click', async () => {
                 ta2.classList.remove('hidden')
                 ta2.value = plainPreview
               } else {
-                ta2.value = ''
-                ta2.classList.add('hidden')
+                ta2.value = analysisText || ''
               }
             } else {
               ta2.classList.remove('hidden')
@@ -723,7 +721,9 @@ $('#btn-scan')?.addEventListener('click', async () => {
       }
     }
 
-    const normalizedText = joinBrokenLines(analysisText)
+    // NER/정규식/레닥션 기준 텍스트(인덱스 정합)는 full_text만 사용
+    const isPdf = ext === 'pdf'
+    const normalizedText = isPdf ? analysisText : joinBrokenLines(analysisText)
 
     setStatus('정규식 매칭 중...')
     const rules = selectedRuleNames()
@@ -743,11 +743,12 @@ $('#btn-scan')?.addEventListener('click', async () => {
       renderNerTable({ items: [] })
       renderNerDocStats({ items: [] }, normalizedText)
       setOpen('ner', true)
+      __lastNerEntities = []
     } else {
       const excludeSpans = buildExcludeSpansFromMatch(matchData)
       const ner = await requestNerSmart(normalizedText, excludeSpans)
 
-      // ✅ UI는 서버 entities 그대로 출력
+      __lastNerEntities = Array.isArray(ner?.items) ? ner.items : []
       renderNerTable(ner)
       renderNerDocStats(ner, normalizedText)
 
@@ -772,6 +773,10 @@ $('#btn-scan')?.addEventListener('click', async () => {
     const nerLabelsForRedact = selectedNerLabels()
     if (nerLabelsForRedact.length) {
       fdRedact.append('ner_labels_json', JSON.stringify(nerLabelsForRedact))
+    }
+
+    if (Array.isArray(__lastNerEntities) && __lastNerEntities.length) {
+      fdRedact.append('ner_entities_json', JSON.stringify(__lastNerEntities))
     }
 
     const r4 = await fetch(`${API_BASE()}/redact/file`, {
