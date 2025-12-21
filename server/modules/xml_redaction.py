@@ -7,51 +7,53 @@ import zipfile
 import logging
 import tempfile
 import subprocess
-from typing import List, Optional
+import re
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-import fitz  # PyMuPDF
+import fitz
 from fastapi import HTTPException
 
-# XmlScanResponse 임포트: core 우선, 실패 시 대안 경로
+# XmlScanResponse 임포트 (core 우선, 실패 시 대안 경로)
 try:
-    from ..core.schemas import XmlScanResponse  # 일반적인 현재 리포 구조 (server/xml_redaction.py 기준)
+    from ..core.schemas import XmlScanResponse
 except Exception:
     try:
-        from ..schemas import XmlScanResponse   # 일부 브랜치/옛 구조
+        from ..schemas import XmlScanResponse
     except Exception:
-        from server.core.schemas import XmlScanResponse  # 절대경로 fallback
+        from server.core.schemas import XmlScanResponse
 
-# 같은 패키지 내부 모듈 임포트
+# 모듈 임포트 (상대 경로 우선)
 try:
     from . import docx_module as docx
-except Exception:  # pragma: no cover
-    from server.modules import docx_module as docx  # type: ignore
+except Exception:
+    from server.modules import docx_module as docx
 
 try:
     from . import xlsx_module as xlsx
-except Exception:  # pragma: no cover
-    from server.modules import xlsx_module as xlsx  # type: ignore
+except Exception:
+    from server.modules import xlsx_module as xlsx
 
 try:
     from . import pptx_module as pptx
-except Exception:  # pragma: no cover
-    from server.modules import pptx_module as pptx  # type: ignore
+except Exception:
+    from server.modules import pptx_module as pptx
 
 try:
     from . import hwpx_module as hwpx
-except Exception:  # pragma: no cover
-    from server.modules import hwpx_module as hwpx  # type: ignore
+except Exception:
+    from server.modules import hwpx_module as hwpx
 
-# compile_rules 유틸 임포트
+# 규칙 컴파일러
 try:
     from .common import compile_rules
-except Exception:  # pragma: no cover
-    from server.modules.common import compile_rules  # type: ignore
+except Exception:
+    from server.modules.common import compile_rules
 
 log = logging.getLogger("xml_redaction")
 
-# 타입 판별
+
 def detect_xml_type(filename: str) -> str:
+    # 확장자로 포맷 판별
     l = (filename or "").lower()
     if l.endswith(".docx"): return "docx"
     if l.endswith(".xlsx"): return "xlsx"
@@ -60,46 +62,81 @@ def detect_xml_type(filename: str) -> str:
     raise HTTPException(400, f"Unsupported XML type for: {filename}")
 
 
-# 스캔
-def xml_scan(file_bytes: bytes, filename: str) -> XmlScanResponse:
-    text_limit = int(os.getenv("XML_SCAN_TEXT_LIMIT", "20000"))
-    with io.BytesIO(file_bytes) as bio, zipfile.ZipFile(bio, "r") as zipf:
-        kind = detect_xml_type(filename)
-        if kind == "xlsx":
-            matches, k, text = xlsx.scan(zipf)
-        elif kind == "pptx":
-            matches, k, text = pptx.scan(zipf)
-        elif kind == "hwpx":
-            matches, k, text = hwpx.scan(zipf)
-        elif kind == "docx":
-            matches, k, text = docx.scan(zipf)
-        else:
-            raise HTTPException(400, f"Unknown kind: {kind}")
-
-        if text and len(text) > text_limit:
-            text = text[:text_limit] + "\n… (truncated)"
-        return XmlScanResponse(
-            file_type=k,
-            total_matches=len(matches),
-            matches=matches,
-            extracted_text=text or "",
-        )
-
-
-# HWPX: 시크릿 수집(사전 스캔)
 def _collect_hwpx_secrets(zin: zipfile.ZipFile) -> List[str]:
+    # HWPX에서 사전 매칭으로 마스킹 키워드 수집
     text = hwpx.hwpx_text(zin)
     comp = compile_rules()
     secrets: List[str] = []
     seen = set()
-    for _rule, rx, _need_valid, _prio in comp:
+    # compile_rules()는 (name, regex, need_valid, prio, validator) 형태를 반환
+    for _rule, rx, _need_valid, _prio, _validator in comp:
         for m in rx.finditer(text or ""):
             v = m.group(0)
             if v and v not in seen:
-                seen.add(v); secrets.append(v)
+                seen.add(v)
+                secrets.append(v)
     return secrets
 
-# 프리뷰 재생성 유틸(soffice → PDF → PNG)
+
+def _ner_entities_to_extra_comp(
+    ner_entities: Optional[List[Any]],
+    ner_allowed: Optional[List[str]] = None,
+) -> List[Tuple[str, re.Pattern, bool, int, Optional[object]]]:
+    """
+    클라이언트가 /ner/predict로 받은 entities(ner_entities_json)를
+    XML 레닥션 파이프라인이 이해하는 comp(tuple)로 변환한다.
+
+    comp 형태: (rule_name, compiled_regex, need_valid, priority, validator)
+    - 여기서는 validator 없이 exact-literal 매칭만 수행한다.
+    """
+    if not isinstance(ner_entities, list) or not ner_entities:
+        return []
+
+    allow_set: Optional[Set[str]] = None
+    if isinstance(ner_allowed, list) and ner_allowed:
+        allow_set = {str(x).strip().upper() for x in ner_allowed if str(x).strip()}
+
+    max_n = int(os.getenv("XML_NER_MAX_PATTERNS", "500") or "500")
+    min_len = int(os.getenv("XML_NER_MIN_TEXT_LEN", "2") or "2")
+
+    seen: Set[str] = set()
+    out: List[Tuple[str, re.Pattern, bool, int, Optional[object]]] = []
+
+    for ent in ner_entities:
+        if not isinstance(ent, dict):
+            continue
+
+        lab = str(ent.get("label") or ent.get("entity_group") or ent.get("entity") or "").strip().upper()
+        if allow_set is not None and lab and lab not in allow_set:
+            continue
+
+        txt = str(ent.get("text") or "").strip()
+        if not txt or len(txt) < min_len:
+            continue
+
+        if txt in seen:
+            continue
+        seen.add(txt)
+
+        # 너무 많이 추가되면 속도/메모리 부담 → 상한
+        if max_n > 0 and len(out) >= max_n:
+            break
+
+        rule_name = f"NER_{lab}" if lab else "NER"
+        try:
+            rx = re.compile(re.escape(txt))
+        except re.error:
+            continue
+
+        # need_valid=False, prio는 낮게(정규식 룰보다 보통 뒤)
+        out.append((rule_name, rx, False, 1, None))
+
+    if out:
+        log.info("XML redact: extra NER patterns=%d (allowed=%s)", len(out), allow_set)
+    return out
+
+
+# LibreOffice 실행 파일 탐색
 def _find_soffice() -> Optional[str]:
     candidates = [
         shutil.which("soffice"),
@@ -113,7 +150,9 @@ def _find_soffice() -> Optional[str]:
             return p
     return None
 
+
 def _office_to_pdf_with_soffice(in_path: str, out_dir: str) -> str:
+    # 문서를 PDF로 변환
     soffice = _find_soffice()
     if not soffice:
         raise RuntimeError("LibreOffice(soffice) 실행 파일을 찾지 못했습니다.")
@@ -138,7 +177,9 @@ def _office_to_pdf_with_soffice(in_path: str, out_dir: str) -> str:
         pdf_path = cands[0]
     return pdf_path
 
+
 def _render_pdf_to_png_bytes(pdf_path: str, dpi: int = 144) -> List[bytes]:
+    # PDF → PNG 바이트 목록
     images: List[bytes] = []
     doc = fitz.open(pdf_path)
     try:
@@ -152,7 +193,9 @@ def _render_pdf_to_png_bytes(pdf_path: str, dpi: int = 144) -> List[bytes]:
     log.info("HWPX preview regen: rendered %d page(s) at %ddpi", len(images), dpi)
     return images
 
+
 def _list_preview_names(zipf: zipfile.ZipFile) -> List[str]:
+    # ZIP 내 프리뷰 이미지 경로 수집
     names = []
     for n in zipf.namelist():
         nl = n.lower()
@@ -161,12 +204,14 @@ def _list_preview_names(zipf: zipfile.ZipFile) -> List[str]:
     names.sort()
     return names
 
+
 def _rewrite_zip_replacing_previews(
     redacted_tmp_hwpx: str,
     dst_path: str,
     new_images: List[bytes],
     original_preview_names: List[str],
 ) -> None:
+    # 프리뷰 이미지만 새 이미지로 교체
     with zipfile.ZipFile(redacted_tmp_hwpx, "r") as zin, \
          zipfile.ZipFile(dst_path, "w", zipfile.ZIP_DEFLATED) as zout:
 
@@ -205,9 +250,18 @@ def _rewrite_zip_replacing_previews(
         os.path.basename(dst_path),
     )
 
-# 레닥션(파일→파일)
-def xml_redact_to_file(src_path: str, dst_path: str, filename: str) -> None:
-    comp = compile_rules()
+
+def xml_redact_to_file(
+    src_path: str,
+    dst_path: str,
+    filename: str,
+    ner_entities: Optional[List[Any]] = None,
+    ner_allowed: Optional[List[str]] = None,
+) -> None:
+    # XML 포맷 레닥션 → 파일 저장
+    base_comp = compile_rules()
+    extra_comp = _ner_entities_to_extra_comp(ner_entities, ner_allowed=ner_allowed)
+    comp = base_comp + extra_comp
     kind = detect_xml_type(filename)
     log.info("XML redact: file=%s kind=%s", filename, kind)
 
@@ -225,6 +279,7 @@ def xml_redact_to_file(src_path: str, dst_path: str, filename: str) -> None:
     with tempfile.TemporaryDirectory() as td:
         tmp_redacted = os.path.join(td, os.path.splitext(os.path.basename(dst_path))[0] + ".tmp.hwpx")
 
+        # ZIP 항목 순회하며 파트별 레닥션
         with zipfile.ZipFile(src_path, "r") as zin, zipfile.ZipFile(tmp_redacted, "w", zipfile.ZIP_DEFLATED) as zout:
             if kind == "hwpx" and "mimetype" in zin.namelist():
                 zi = zipfile.ZipInfo("mimetype")
@@ -238,7 +293,7 @@ def xml_redact_to_file(src_path: str, dst_path: str, filename: str) -> None:
                 if red is None:
                     zout.writestr(item, data); kept += 1
                 elif isinstance(red, (bytes, bytearray)) and len(red) == 0:
-                    dropped += 1  # skip
+                    dropped += 1
                 else:
                     zout.writestr(item, red); modified += 1
 
@@ -259,6 +314,7 @@ def xml_redact_to_file(src_path: str, dst_path: str, filename: str) -> None:
 
             log.info("%s ZIP result: kept=%d modified=%d dropped=%d", kind.upper(), kept, modified, dropped)
 
+        # 프리뷰 재생성 옵션
         regen = (os.getenv("HWPX_REGEN_PREVIEW", "0") in ("1", "true", "TRUE"))
         if kind == "hwpx" and regen:
             log.info("HWPX preview regen: start (env HWPX_REGEN_PREVIEW=1)")

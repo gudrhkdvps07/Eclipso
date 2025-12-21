@@ -9,10 +9,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
-
 from server.api.redaction_api import match_text
 from server.modules import doc_module, hwp_module, pdf_module, ppt_module, xls_module
-from server.modules.ner_module import run_ner  # 기존 틀 유지(미사용이어도 유지)
+from server.modules.ner_module import run_ner 
 from server.modules.xml_redaction import xml_redact_to_file
 
 router = APIRouter(prefix="/redact", tags=["redact"])
@@ -20,7 +19,6 @@ router = APIRouter(prefix="/redact", tags=["redact"])
 
 def _is_email_rule(rule_name: str) -> bool:
     return "email" in (rule_name or "").lower()
-
 
 def _call_apply_text_redaction(pdf_bytes: bytes, spans: List[Dict[str, Any]]) -> bytes:
     fn = pdf_module.apply_text_redaction
@@ -241,7 +239,7 @@ async def redact_file(
             mime = "application/pdf"
 
         elif ext == ".hwp":
-            # HWP는 NER spans를 지원 (start-end)
+            # NER spans (start-end)
             plain_text = hwp_module.extract_text(file_bytes).get("full_text") or ""
             if not plain_text.strip():
                 raise HTTPException(400, "HWP plain text가 비어 있습니다.")
@@ -405,7 +403,14 @@ async def redact_file(
                 dst = os.path.join(tmpdir, f"dst{ext}")
                 with open(src, "wb") as f:
                     f.write(file_bytes)
-                xml_redact_to_file(src, dst, file.filename)
+                # ZIP-XML(docx/pptx/xlsx/hwpx)도 NER 결과를 반영해서 레닥션
+                xml_redact_to_file(
+                    src,
+                    dst,
+                    file.filename,
+                    ner_entities=client_entities,
+                    ner_allowed=ner_allowed,
+                )
                 with open(dst, "rb") as f:
                     out = f.read()
             mime = "application/zip"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+import xml.etree.ElementTree as ET
 from typing import List, Tuple
 
 # common 유틸 임포트: 상대 경로 우선, 실패 시 절대 경로 fallback
@@ -17,7 +18,7 @@ try:
         chart_rels_sanitize,
         sanitize_docx_content_types,
     )
-except Exception:  # pragma: no cover - 구조가 달라졌을 때 대비
+except Exception:  # pragma: no cover 
     from server.modules.common import (  # type: ignore
         cleanup_text,
         compile_rules,
@@ -39,7 +40,14 @@ except Exception:
         from server.core.schemas import XmlMatch, XmlLocation  # 절대경로 fallback
 
 
-# DOCX 텍스트 추출
+def _local(tag: str) -> str:
+    """XML 태그에서 로컬 네임만 추출: '{uri}p' -> 'p'"""
+    if "}" in tag:
+        return tag.rsplit("}", 1)[-1]
+    return tag
+
+
+# DOCX 텍스트 추출 (차트/임베디드 포함)
 def _collect_chart_texts(zipf: zipfile.ZipFile) -> str:
     parts: List[str] = []
 
@@ -73,17 +81,65 @@ def _collect_chart_texts(zipf: zipfile.ZipFile) -> str:
     return cleanup_text("\n".join(p for p in parts if p))
 
 
-def docx_text(zipf: zipfile.ZipFile) -> str:
-    # 본문(document.xml)
-    try:
-        xml = zipf.read("word/document.xml").decode("utf-8", "ignore")
-    except KeyError:
-        xml = ""
+def _document_xml_to_text_with_layout(xml_bytes: bytes) -> str:
+    """
+    DOCX의 word/document.xml 을 파싱해서 문단/표 레이아웃을 \n / \t 로 복원.
 
-    text_main = "".join(
-        m.group(1) for m in re.finditer(r"<w:t[^>]*>(.*?)</w:t>", xml, re.DOTALL)
-    )
-    text_main = cleanup_text(text_main)
+    - w:t 텍스트 수집
+    - w:tab → \t
+    - w:br  → \n
+    - p 종료(w:p end)  → \n
+    - tc 종료(w:tc end) → \t
+    - tr 종료(w:tr end) → \n
+    - tbl 종료(w:tbl end) → \n
+    """
+    out: List[str] = []
+
+    try:
+        it = ET.iterparse(io.BytesIO(xml_bytes), events=("start", "end"))
+    except Exception:
+        # 파싱 실패 시 기존 방식으로 fallback
+        s = xml_bytes.decode("utf-8", "ignore")
+        text_main = "".join(
+            m.group(1) for m in re.finditer(r"<w:t[^>]*>(.*?)</w:t>", s, re.DOTALL)
+        )
+        return cleanup_text(text_main)
+
+    for ev, el in it:
+        name = _local(el.tag).lower()
+
+        if ev == "start":
+            if name == "t":
+                if el.text:
+                    out.append(el.text)
+            elif name == "tab":
+                out.append("\t")
+            elif name == "br":
+                out.append("\n")
+        else:  # end
+            if name == "p":
+                out.append("\n")
+            elif name == "tc":
+                out.append("\t")
+            elif name == "tr":
+                out.append("\n")
+            elif name == "tbl":
+                out.append("\n")
+
+            # 메모리 절약
+            el.clear()
+
+    return cleanup_text("".join(out))
+
+
+def docx_text(zipf: zipfile.ZipFile) -> str:
+    # 본문(document.xml) - 레이아웃 보존 추출
+    try:
+        xml_bytes = zipf.read("word/document.xml")
+    except KeyError:
+        xml_bytes = b""
+
+    text_main = _document_xml_to_text_with_layout(xml_bytes)
 
     # 차트 + 임베디드 XLSX
     text_charts = _collect_chart_texts(zipf)

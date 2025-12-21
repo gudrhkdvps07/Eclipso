@@ -156,7 +156,8 @@
             <div class="space-y-2">
               <button
                 id="btn-scan"
-                class="w-full px-4 py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
+                class="w-full px-4 py-2.5 rounded-lg text-white transition"
+                style="background-color: oklch(65.802% 0.05764 310.975)"
               >
                 스캔 실행
               </button>
@@ -193,6 +194,282 @@
               id="text-table-preview"
               class="mt-3 text-xs text-gray-800 overflow-x-auto"
             ></div>
+          </div>
+
+          <!-- 리스크 평가 리포트(통계) -->
+          <div
+            id="stats-report-block"
+            class="bg-white rounded-2xl shadow-sm border border-gray-100 hidden"
+          >
+            <div class="px-5 py-4 flex items-start justify-between gap-4">
+              <div class="min-w-0">
+                <h2 class="font-semibold">평가 리포트</h2>
+                <div
+                  id="stats-subtitle"
+                  class="text-sm text-gray-500 mt-1 break-words"
+                >
+                  -
+                </div>
+              </div>
+              <div class="shrink-0 flex items-center gap-2">
+                <button
+                  id="btn-stats-download"
+                  type="button"
+                  class="text-xs px-2 py-1 rounded-lg bg-gray-900 text-white hover:bg-gray-800 transition"
+                >
+                  리포트 다운로드
+                </button>
+                <button
+                  id="btn-stats-json-toggle"
+                  type="button"
+                  class="text-xs px-2 py-1 rounded-lg border border-gray-300 hover:bg-gray-50 transition"
+                >
+                  JSON
+                </button>
+              </div>
+            </div>
+
+            <div class="border-t p-5 space-y-6">
+              <!-- 상단 KPI -->
+              <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+                <!-- Risk Score -->
+                <div class="rounded-2xl border border-gray-200 p-4 bg-gray-50">
+                  <div class="text-xs text-gray-500">민감정보 비율</div>
+                  <div class="mt-1 flex items-end justify-between gap-3">
+                    <div
+                      id="stats-risk-score"
+                      class="text-3xl font-semibold tracking-tight"
+                    >
+                      0
+                    </div>
+                    <div class="text-xs text-gray-500">/ 100</div>
+                  </div>
+                  <div class="mt-3 h-2 rounded bg-gray-200 overflow-hidden">
+                    <div
+                      id="stats-risk-meter"
+                      class="h-2"
+                      style="
+                        width: 0%;
+                        background-color: oklch(62.7% 0.265 303.9);
+                      "
+                    ></div>
+                  </div>
+                  <div
+                    id="stats-risk-note"
+                    class="mt-2 text-[11px] text-gray-500"
+                  >
+                    -
+                  </div>
+                </div>
+
+                <!-- Unique detections -->
+                <div class="rounded-2xl border border-gray-200 p-4">
+                  <div class="text-xs text-gray-500">총 탐지 (Unique)</div>
+                  <div
+                    id="stats-total-unique"
+                    class="mt-1 text-3xl font-semibold tracking-tight"
+                  >
+                    0
+                  </div>
+                  <div class="mt-2 text-[11px] text-gray-500">
+                    <span class="text-gray-400">Raw:</span>
+                    <span id="stats-total-raw">0</span>
+                    <span class="mx-1 text-gray-300">|</span>
+                    <span class="text-gray-400">Overlap:</span>
+                    <span id="stats-overlap-rate">0%</span>
+                  </div>
+                  <div class="mt-3 pt-3 border-t border-gray-100">
+                    <div class="flex items-center gap-4 text-[11px]">
+                      <div>
+                        <span class="text-gray-400">정규식:</span>
+                        <span
+                          id="stats-regex-unique"
+                          class="ml-1 font-semibold text-gray-900"
+                          >0</span
+                        >
+                      </div>
+                      <div>
+                        <span class="text-gray-400">NER:</span>
+                        <span
+                          id="stats-ner-unique"
+                          class="ml-1 font-semibold text-gray-900"
+                          >0</span
+                        >
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <!-- Regex OK/FAIL + FAIL 분석 -->
+                <div class="rounded-2xl border border-gray-200 p-4">
+                  <div class="text-xs text-gray-500">정규식 검증</div>
+
+                  <div class="mt-2 flex items-center gap-2">
+                    <span
+                      class="text-[11px] px-2 py-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700"
+                    >
+                      OK <span id="stats-regex-ok" class="font-mono">0</span>
+                    </span>
+                    <span
+                      class="text-[11px] px-2 py-1 rounded-full border border-rose-200 bg-rose-50 text-rose-700"
+                    >
+                      FAIL
+                      <span id="stats-regex-fail" class="font-mono">0</span>
+                    </span>
+                  </div>
+
+                  <div class="mt-3 text-[11px] text-gray-500">FAIL 원인</div>
+                  <div
+                    id="stats-fail-top"
+                    class="mt-1 text-[12px] text-gray-900 leading-relaxed"
+                  >
+                    -
+                  </div>
+
+                  <div class="mt-2 text-[11px] text-gray-500">
+                    valid=false 항목만 집계
+                  </div>
+                </div>
+
+                <!-- NER Avg -->
+                <div class="rounded-2xl border border-gray-200 p-4">
+                  <div class="text-xs text-gray-500">NER 평균 Score</div>
+                  <div
+                    id="stats-ner-avg"
+                    class="mt-1 text-sm font-medium text-gray-900"
+                  >
+                    PS - / LC - / OG -
+                  </div>
+                  <div class="mt-2 text-[11px] text-gray-500">
+                    선택된 라벨만 반영
+                  </div>
+                </div>
+              </div>
+
+              <!-- 정책/처리시간 -->
+              <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                <!-- 정책: 칩 -->
+                <div class="rounded-2xl border border-gray-200 p-4">
+                  <div class="text-xs text-gray-500">정책</div>
+
+                  <div class="mt-2">
+                    <div class="text-[12px] text-gray-500 mb-1">
+                      정규식 규칙
+                    </div>
+                    <div
+                      id="stats-policy-rules"
+                      class="flex flex-wrap gap-1"
+                    ></div>
+                  </div>
+
+                  <div class="mt-3">
+                    <div class="text-[12px] text-gray-500 mb-1">NER 라벨</div>
+                    <div
+                      id="stats-policy-nerlabels"
+                      class="flex flex-wrap gap-1"
+                    ></div>
+                  </div>
+                </div>
+
+                <!-- 처리시간: 표 -->
+                <div class="rounded-2xl border border-gray-200 p-4">
+                  <div class="text-xs text-gray-500">처리 시간</div>
+
+                  <div
+                    class="mt-2 overflow-auto rounded-xl border border-gray-200"
+                  >
+                    <table class="min-w-full text-sm">
+                      <thead>
+                        <tr class="border-b bg-gray-50">
+                          <th class="text-left py-2 px-3">Step</th>
+                          <th class="text-right py-2 px-3">Time</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr class="border-b">
+                          <td class="py-2 px-3">extract</td>
+                          <td
+                            id="t-extract"
+                            class="py-2 px-3 text-right font-mono"
+                          >
+                            -
+                          </td>
+                        </tr>
+                        <tr class="border-b">
+                          <td class="py-2 px-3">match</td>
+                          <td
+                            id="t-match"
+                            class="py-2 px-3 text-right font-mono"
+                          >
+                            -
+                          </td>
+                        </tr>
+                        <tr class="border-b">
+                          <td class="py-2 px-3">ner</td>
+                          <td id="t-ner" class="py-2 px-3 text-right font-mono">
+                            -
+                          </td>
+                        </tr>
+                        <tr class="border-b">
+                          <td class="py-2 px-3">redact</td>
+                          <td
+                            id="t-redact"
+                            class="py-2 px-3 text-right font-mono"
+                          >
+                            -
+                          </td>
+                        </tr>
+                        <tr>
+                          <td class="py-2 px-3 font-semibold">total</td>
+                          <td
+                            id="t-total"
+                            class="py-2 px-3 text-right font-mono font-semibold"
+                          >
+                            -
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 표: by_kind / by_label -->
+              <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                <div>
+                  <div class="text-sm font-semibold mb-2">유형별 건수</div>
+                  <div class="overflow-auto rounded-xl border border-gray-200">
+                    <table class="min-w-full text-sm">
+                      <thead>
+                        <tr class="border-b bg-gray-50">
+                          <th class="text-left py-2 px-3">Type</th>
+                          <th class="text-right py-2 px-3">Count</th>
+                        </tr>
+                      </thead>
+                      <tbody id="stats-by-kind-rows"></tbody>
+                    </table>
+                  </div>
+                </div>
+                <div>
+                  <div class="text-sm font-semibold mb-2">라벨별 건수</div>
+                  <div class="overflow-auto rounded-xl border border-gray-200">
+                    <table class="min-w-full text-sm">
+                      <thead>
+                        <tr class="border-b bg-gray-50">
+                          <th class="text-left py-2 px-3">Label</th>
+                          <th class="text-right py-2 px-3">Count</th>
+                        </tr>
+                      </thead>
+                      <tbody id="stats-by-label-rows"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <pre
+                id="stats-json"
+                class="hidden text-xs bg-gray-50 border border-gray-200 rounded-xl p-3 overflow-auto"
+              ></pre>
+            </div>
           </div>
 
           <!-- 매칭 결과(토글) -->
