@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import zlib
 import struct
+import re
 from typing import List, Tuple, Optional, Dict, Any
 import olefile
 
@@ -222,6 +223,83 @@ def discover_ole_ids(section_bytes: bytes) -> List[int]:
 # ─────────────────────────────
 IMAGE_EXTS = (".bmp", ".gif", ".jpg", ".jpeg",".pcx", ".pic", ".png", ".tif", ".tiff")
 
+# HWP 본문 텍스트에 섞여 나오는 제어문자/쓰레기 유니코드 제거(줄바꿈/탭은 유지)
+_CTRL_CHARS = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
+_SPACE_RUN = re.compile(r"[ \u00A0\u2007\u202F]{2,}")
+_TRAIL_SPACE = re.compile(r"[ \t]+$")
+
+def _is_allowed_hwp_char(ch: str) -> bool:
+    """
+    HWP TAG_PARA_TEXT는 텍스트 외 데이터가 섞여 나오는 경우가 있어,
+    한글/영문/숫자/일반 구두점/이메일 기호 중심으로 화이트리스트 적용.
+    """
+    if not ch:
+        return False
+    o = ord(ch)
+    if ch in ("\n", "\t", " "):
+        return True
+    # ASCII printable
+    if 0x21 <= o <= 0x7E:
+        return True
+    # Hangul syllables + jamo (한글)
+    if 0xAC00 <= o <= 0xD7A3:
+        return True
+    if 0x1100 <= o <= 0x11FF:
+        return True
+    if 0x3130 <= o <= 0x318F:
+        return True
+    # (선택) 원화기호/중점 등 문서에서 흔한 기호
+    if o in (0x20A9, 0x00B7):
+        return True
+    return False
+
+def _clean_hwp_text(s: str) -> str:
+    if not s:
+        return ""
+
+    # CR은 LF로 통일
+    s = s.replace("\r", "\n")
+
+    # 1) 제어문자 제거 (LF/TAB은 유지)
+    s = _CTRL_CHARS.sub("", s)
+
+    # 2) 허용 문자만 보존, 나머지는 공백으로 치환(이메일 같은 경우 단어가 붙는 걸 방지)
+    out_chars: List[str] = []
+    for ch in s:
+        out_chars.append(ch if _is_allowed_hwp_char(ch) else " ")
+    s2 = "".join(out_chars)
+
+    # 3) 공백 정리 (줄 단위 trailing 제거 + 연속 공백 축약)
+    lines: List[str] = []
+    for raw in s2.split("\n"):
+        raw = _SPACE_RUN.sub(" ", raw)
+        raw = _TRAIL_SPACE.sub("", raw)
+        # 쓰레기만 남은 라인 제거(문자/숫자/한글/@ 없는 경우 드랍)
+        stripped = raw.strip()
+        if not stripped:
+            lines.append("")
+            continue
+        has_signal = any(
+            ("0" <= c <= "9") or ("A" <= c <= "Z") or ("a" <= c <= "z") or (c == "@") or ("\uAC00" <= c <= "\uD7A3")
+            for c in stripped
+        )
+        if not has_signal:
+            lines.append("")
+            continue
+        lines.append(stripped)
+
+    # 연속 빈 줄 축약(최대 1줄)
+    cleaned_lines: List[str] = []
+    prev_blank = False
+    for ln in lines:
+        is_blank = (ln.strip() == "")
+        if is_blank and prev_blank:
+            continue
+        cleaned_lines.append(ln)
+        prev_blank = is_blank
+
+    return "\n".join(cleaned_lines).strip()
+
 def extract_bindata_images(file_bytes: bytes) -> list[dict]:
     results = []
 
@@ -268,9 +346,11 @@ def extract_text(file_bytes: bytes) -> dict:
             dec, _ = _decompress(ole.openstream(path).read())
             for tag, _, payload, _, _ in iter_hwp_records(dec):
                 if tag == TAG_PARA_TEXT:
-                    texts.append(payload.decode("utf-16le", "ignore"))
+                    texts.append(_clean_hwp_text(payload.decode("utf-16le", "ignore")))
 
-    full = "".join(texts)
+    # TAG_PARA_TEXT는 문단 단위 텍스트 조각이므로, 문단 경계를 '\n'으로 보존한다.
+    # (그대로 이어붙이면 NER 입력에서 레이아웃/문맥이 사라져 탐지 품질이 떨어질 수 있음)
+    full = "\n".join(t for t in texts if t is not None)
     return {"full_text": full, "pages": [{"page": 1, "text": full}]}
 
 

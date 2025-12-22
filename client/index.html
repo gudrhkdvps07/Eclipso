@@ -26,17 +26,17 @@
     </script>
   </head>
 
-  <body class="bg-gray-50 text-gray-900">
+  <body class="bg-[#F7F3FF] text-gray-900">
     <!-- 상단바 -->
-    <header class="border-b border-gray-200 bg-white/70 backdrop-blur">
+    <header class="border-b border-[#E2D6FB] bg-white/70 backdrop-blur">
       <div
         class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between"
       >
         <div class="flex items-center gap-2">
-          <div class="h-6 w-6 rounded-full bg-blue-600"></div>
+          <div class="h-6 w-6 rounded-full bg-[#B7A3E3]"></div>
           <h1 class="text-xl font-semibold tracking-tight">Eclipso</h1>
         </div>
-        <div class="text-sm text-gray-500">문서 개인정보 스캔 · 레닥션</div>
+        <div class="text-sm text-[#6C50B3]">문서 개인정보 스캔 · 레닥션</div>
       </div>
     </header>
 
@@ -53,11 +53,11 @@
               <label
                 id="dropzone"
                 for="file"
-                class="block cursor-pointer rounded-xl border-2 border-dashed border-gray-300 hover:border-gray-400 bg-gray-50 px-4 py-6 text-center transition"
+                class="block cursor-pointer rounded-xl border-2 border-dashed border-[#D2C0F5] hover:border-[#B7A3E3] bg-[#F7F3FF] px-4 py-6 text-center transition"
                 role="button"
                 tabindex="0"
               >
-                <div class="text-sm text-gray-500">
+                <div class="text-sm text-[#6C50B3]">
                   <img
                     class="w-10 h-10 mx-auto mb-2"
                     src="https://images.icon-icons.com/1875/PNG/512/fileupload_120150.png"
@@ -68,7 +68,7 @@
                   </p>
                 </div>
 
-                <div id="file-name" class="mt-2 text-xs text-gray-400"></div>
+                <div id="file-name" class="mt-2 text-xs text-[#8569CB]"></div>
               </label>
               <input
                 id="file"
@@ -79,7 +79,7 @@
             </div>
 
             <!-- 규칙(정규식) -->
-            <fieldset class="rounded-xl border border-gray-200 p-4">
+            <fieldset class="rounded-xl border border-[#E2D6FB] p-4">
               <legend class="px-1 text-sm font-medium">규칙 선택</legend>
               <div id="rules-container" class="mt-2 space-y-2 text-sm">
                 <!-- /text/rules 실패 시 기본값 -->
@@ -134,7 +134,7 @@
             </fieldset>
 
             <!-- NER 표시(필터) -->
-            <fieldset class="rounded-xl border border-gray-200 p-4">
+            <fieldset class="rounded-xl border border-[#E2D6FB] p-4">
               <legend class="px-1 text-sm font-medium">NER</legend>
               <div class="mt-2 space-y-2 text-sm">
                 <label class="flex items-center gap-2">
@@ -156,14 +156,13 @@
             <div class="space-y-2">
               <button
                 id="btn-scan"
-                class="w-full px-4 py-2.5 rounded-lg text-white transition"
-                style="background-color: oklch(65.802% 0.05764 310.975)"
+                class="w-full px-4 py-2.5 rounded-lg text-white transition bg-[#B7A3E3] hover:bg-[#9E86D7]"
               >
                 스캔 실행
               </button>
               <button
                 id="btn-save-redacted"
-                class="w-full px-4 py-2.5 rounded-lg border border-gray-300 hover:bg-gray-50 transition hidden"
+                class="w-full px-4 py-2.5 rounded-lg border border-[#D2C0F5] hover:bg-[#F7F3FF] transition hidden"
                 disabled
               >
                 레닥션 결과 다운로드
@@ -171,8 +170,8 @@
             </div>
 
             <!-- 상태표시 -->
-            <div class="rounded-lg bg-gray-50 px-3 py-2 text-sm">
-              <span id="status" class="text-gray-500">대기 중</span>
+            <div class="rounded-lg bg-[#F7F3FF] px-3 py-2 text-sm">
+              <span id="status" class="text-[#6C50B3]">대기 중</span>
             </div>
           </section>
         </aside>
@@ -248,10 +247,7 @@
                     <div
                       id="stats-risk-meter"
                       class="h-2"
-                      style="
-                        width: 0%;
-                        background-color: oklch(62.7% 0.265 303.9);
-                      "
+                      style="width: 0%; background-color: #b7a3e3"
                     ></div>
                   </div>
                   <div

@@ -87,7 +87,11 @@ async def extract_text(file: UploadFile):
 
         return data
 
+    except HTTPException:
+        # extract_from_file 등이 올바르게 던진 status_code(예: 415)를 500으로 덮어쓰지 않도록 그대로 전달
+        raise
     except Exception as e:
+        logger.exception("텍스트 추출 중 오류: filename=%s", getattr(file, "filename", None))
         raise HTTPException(500, detail=str(e))
 
 

@@ -236,7 +236,7 @@ def create_new_ole_file(original_file_bytes: bytes, new_word_data: bytes) -> byt
 
 
 # 전체 레닥션 프로세스
-def redact_word_document(file_bytes: bytes) -> bytes:
+def redact_word_document(file_bytes: bytes, spans: Optional[List[Dict[str, Any]]] = None) -> bytes:
     try:
         data = extract_text(file_bytes)
         raw_text = data.get("raw_text", "")
@@ -255,13 +255,42 @@ def redact_word_document(file_bytes: bytes) -> bytes:
                 if end <= start:
                     end = start + (e - s)
                 targets.append((start, end, val))
+
+        # NER spans(plain text 기준)을 정규화 텍스트 인덱스 → raw_text 인덱스로 매핑
+        if spans:
+            n_norm = len(norm_text)
+            for sp in spans:
+                if not isinstance(sp, dict):
+                    continue
+                s = sp.get("start")
+                e = sp.get("end")
+                if s is None or e is None:
+                    continue
+                try:
+                    s = int(s)
+                    e = int(e)
+                except Exception:
+                    continue
+                s = max(0, min(n_norm, s))
+                e = max(0, min(n_norm, e))
+                if e <= s:
+                    continue
+                if s not in index_map or (e - 1) not in index_map:
+                    continue
+                rs = index_map[s]
+                re_ = index_map.get(e - 1, rs) + 1
+                if re_ <= rs:
+                    continue
+                seg = raw_text[rs:re_]
+                if seg and seg.strip():
+                    targets.append((rs, re_, seg))
         return replace_text(file_bytes, targets)
     except Exception as e:
         print(f"[ERR] WordDocument 레닥션 중 예외: {e}")
         return file_bytes
 
 
-def redact(file_bytes: bytes) -> bytes:
-    redacted_doc = redact_word_document(file_bytes)
+def redact(file_bytes: bytes, spans: Optional[List[Dict[str, Any]]] = None) -> bytes:
+    redacted_doc = redact_word_document(file_bytes, spans=spans)
     redacted_doc = redact_workbooks(redacted_doc)
     return redacted_doc

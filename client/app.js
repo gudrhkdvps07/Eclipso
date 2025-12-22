@@ -79,8 +79,10 @@ function setupDropZone() {
   let depth = 0
   const setActive = (on) => {
     dz.classList.toggle('ring-2', on)
-    dz.classList.toggle('ring-blue-400', on)
-    dz.classList.toggle('bg-blue-50', on)
+    // Tailwind CDN이 외부 JS의 class string을 못 읽는 경우가 있어,
+    // 색상은 inline style로 직접 토글한다.
+    dz.style.setProperty('--tw-ring-color', on ? '#b7a3e3' : '')
+    dz.style.backgroundColor = on ? '#f7f3ff' : ''
   }
   const showName = (f) => {
     if (nameEl) nameEl.textContent = f ? `선택됨: ${f.name}` : ''
@@ -163,7 +165,11 @@ function highlightFrag(ctx, val) {
   const mid = esc(needle)
   const post = esc(src.slice(i + needle.length))
 
-  return pre + `<mark class="bg-yellow-200 rounded px-1">${mid}</mark>` + post
+  return (
+    pre +
+    `<mark class="rounded px-1" style="background-color:#e2d6fb">${mid}</mark>` +
+    post
+  )
 }
 
 let __segFilter = 'all'
@@ -182,18 +188,14 @@ function wireSegmentButtons(root) {
     ;['all', 'ok', 'fail'].forEach((k) => {
       const btn = $(`#seg-${k}`)
       if (!btn) return
-      btn.classList.remove(
-        'bg-gray-900',
-        'text-white',
-        'bg-emerald-600',
-        'bg-rose-600'
-      )
-      if (k === 'all' && which === 'all')
-        btn.classList.add('bg-gray-900', 'text-white')
-      if (k === 'ok' && which === 'ok')
-        btn.classList.add('bg-emerald-600', 'text-white')
-      if (k === 'fail' && which === 'fail')
-        btn.classList.add('bg-rose-600', 'text-white')
+      btn.classList.remove('text-white')
+      btn.style.backgroundColor = ''
+      btn.style.color = ''
+      if (k === which) {
+        btn.classList.add('text-white')
+        btn.style.backgroundColor =
+          which === 'all' ? '#533a8c' : which === 'ok' ? '#9e86d7' : '#8569cb'
+      }
     })
     applySegmentFilter(root)
   }
@@ -239,10 +241,10 @@ function renderRegexResults(res) {
         <div class="flex items-center gap-2">
           <span class="text-sm font-semibold">${esc(rule)}</span>
           <span class="text-xs text-gray-500">총 ${arr.length}건</span>
-          <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">OK ${ok}</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded" style="background-color:#efe8ff;color:#533a8c">OK ${ok}</span>
           ${
             fail
-              ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700">FAIL ${fail}</span>`
+              ? `<span class="text-[10px] px-1.5 py-0.5 rounded" style="background-color:#e2d6fb;color:#3a2a62">FAIL ${fail}</span>`
               : ''
           }
         </div>
@@ -261,8 +263,8 @@ function renderRegexResults(res) {
       const card = document.createElement('div')
       card.dataset.valid = isOk ? '1' : '0'
       card.className =
-        'border rounded-xl p-3 bg-white hover:shadow-sm transition ' +
-        (isOk ? 'border-emerald-200' : 'border-rose-200')
+        'border rounded-xl p-3 bg-white hover:shadow-sm transition'
+      card.style.borderColor = isOk ? '#e2d6fb' : '#d2c0f5'
 
       card.innerHTML = `
         <div class="flex items-start justify-between gap-3">
@@ -273,11 +275,11 @@ function renderRegexResults(res) {
             </div>
           </div>
           <div class="shrink-0">
-            <span class="inline-block text-[11px] px-1.5 py-0.5 rounded border ${
-              isOk
-                ? 'border-emerald-300 text-emerald-700'
-                : 'border-rose-300 text-rose-700'
-            }">${isOk ? 'OK' : 'FAIL'}</span>
+            <span class="inline-block text-[11px] px-1.5 py-0.5 rounded border" style="border-color:${
+              isOk ? '#d2c0f5' : '#b7a3e3'
+            };color:${isOk ? '#533a8c' : '#3a2a62'}">${
+        isOk ? 'OK' : 'FAIL'
+      }</span>
           </div>
         </div>
       `
@@ -877,8 +879,10 @@ function renderChips(containerEl, list, detectedSet = null) {
       detectedSet && (detectedSet.has(vLower) || detectedSet.has(vUpper))
     // 탐지된 항목은 보라색으로 강조
     if (isDetected) {
-      span.className =
-        'text-[11px] px-2 py-1 rounded-full border border-purple-300 bg-purple-100 text-purple-800 font-semibold'
+      span.className = 'text-[11px] px-2 py-1 rounded-full border font-semibold'
+      span.style.borderColor = '#d2c0f5'
+      span.style.backgroundColor = '#efe8ff'
+      span.style.color = '#533a8c'
     } else {
       span.className =
         'text-[11px] px-2 py-1 rounded-full border border-gray-200 bg-gray-50 text-gray-800'
@@ -1153,8 +1157,23 @@ $('#btn-scan')?.addEventListener('click', async () => {
 
     // NER/정규식/레닥션 기준 텍스트는 full_text 기준
     const isPdf = ext === 'pdf'
-    // hwpx / docx / xlsx / pptx 는 서버에서 레이아웃(줄바꿈/탭)을 살려서 내려주므로 줄붙이기를 하지 않는다.
-    const isLayoutPreserved = ['hwpx', 'docx', 'xlsx', 'pptx'].includes(ext)
+    // 레이아웃(줄바꿈/탭)이 의미가 있는 문서들은 줄붙이기(joinBrokenLines)를 하지 않는다.
+    // - pdf: 별도 처리(isPdf)
+    // - hwpx/docx/pptx/xlsx: 서버 추출 단계에서 레이아웃을 최대한 살려서 반환
+    // - hwp/doc/ppt/xls: 레거시 포맷도 줄바꿈을 유지해야 NER 컨텍스트가 깨지지 않음
+    // - docm/xlsm/pptm: 매크로 확장자는 각각 docx/xlsx/pptx 계열로 취급
+    const isLayoutPreserved = [
+      'hwpx',
+      'hwp',
+      'docx',
+      'doc',
+      'pptx',
+      'ppt',
+      'xlsx',
+      'xls',
+      'docm',
+      'pptm',
+    ].includes(ext)
     const normalizedText =
       isPdf || isLayoutPreserved ? analysisText : joinBrokenLines(analysisText)
 

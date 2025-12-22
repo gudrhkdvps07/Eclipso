@@ -1,7 +1,7 @@
 from io import BytesIO
 import struct
 import re
-from typing import List, Tuple, Iterable, Optional, Any, TYPE_CHECKING
+from typing import List, Tuple, Iterable, Optional, Any, TYPE_CHECKING, Dict
 import unicodedata
 
 import unicodedata
@@ -245,7 +245,7 @@ def extract_text(file_bytes: bytes):
     pages = [{"index": 1, "text": text_main or ""}]
     return {"full_text": text_main or "", "pages": pages}
 
-def redact(file_bytes: bytes) -> bytes:
+def redact(file_bytes: bytes, spans: Optional[List[Dict[str, Any]]] = None) -> bytes:
     try:
         from .ole_redactor import redact_ole_bin_preserve_size  
     except Exception:
@@ -264,10 +264,32 @@ def redact(file_bytes: bytes) -> bytes:
 
     secrets: List[str] = []
     if text:
-        spans = list(_iter_rule_matches(text)) if _RULES else []
+        rule_spans = list(_iter_rule_matches(text)) if _RULES else []
+        if rule_spans:
+            _ = _mask_same_len(text, rule_spans)
+            for s, e in rule_spans:
+                seg = text[s:e].strip()
+                if len(seg) >= 2:
+                    secrets.append(seg)
+        # NER spans 추가: 텍스트 조각을 동일길이 마스킹 대상으로 포함
         if spans:
-            _ = _mask_same_len(text, spans)
-            for s, e in spans:
+            n = len(text)
+            for sp in spans:
+                if not isinstance(sp, dict):
+                    continue
+                s = sp.get("start")
+                e = sp.get("end")
+                if s is None or e is None:
+                    continue
+                try:
+                    s = int(s)
+                    e = int(e)
+                except Exception:
+                    continue
+                s = max(0, min(n, s))
+                e = max(0, min(n, e))
+                if e <= s:
+                    continue
                 seg = text[s:e].strip()
                 if len(seg) >= 2:
                     secrets.append(seg)

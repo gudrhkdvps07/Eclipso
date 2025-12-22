@@ -1,5 +1,5 @@
 import io, os, struct, tempfile, olefile
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Set
 
 from server.core.normalize import normalization_index
 from server.core.matching import find_sensitive_spans
@@ -284,7 +284,8 @@ def extract_headerfooter(payload: bytes, count=6):
 
 
 
-def extract_text(file_bytes: bytes):
+def extract_text_from_xls(file_bytes: bytes) -> dict:
+    """레거시 XLS(OLE/BIFF)에서 텍스트를 추출한다."""
     try:
         with olefile.OleFileIO(io.BytesIO(file_bytes)) as ole:
             if not ole.exists("Workbook"):
@@ -465,35 +466,78 @@ def overlay_workbook_stream(file_bytes: bytes, orig_wb: bytes, new_wb: bytes) ->
     return bytes(full)
 
 
-def redact(file_bytes: bytes) -> bytes:
-    print("[INFO] XLS Redaction 시작")
+def redact(file_bytes: bytes, spans: Optional[List[Dict[str, Any]]] = None) -> bytes:
+    """
+    XLS(레거시 OLE/BIFF) 레닥션.
+    - 규칙/정규식 기반으로 탐지된 텍스트 + NER spans에서 추출한 텍스트를 'secrets'로 모아
+      OLE 스트림 전반에 대해 동일 길이 마스킹을 적용한다(파일 크기 보존).
+    """
+    try:
+        from .ole_redactor import redact_ole_bin_preserve_size
+    except Exception:
+        try:
+            from ole_redactor import redact_ole_bin_preserve_size
+        except Exception:
+            redact_ole_bin_preserve_size = None
 
-    with olefile.OleFileIO(io.BytesIO(file_bytes)) as ole:
-        if not ole.exists("Workbook"):
-            print("[ERROR] Workbook 없음")
-            return file_bytes
-        wb = bytearray(ole.openstream("Workbook").read())
+    if redact_ole_bin_preserve_size is None:
+        return file_bytes
 
-    off = 0
-    while off + 4 < len(wb):
-        opcode, length = struct.unpack_from("<HH", wb, off)
-        off += 4
-        payload_off = off
-        payload_end = off + length
+    try:
+        text = (extract_text(file_bytes) or {}).get("full_text", "") or ""
+    except Exception:
+        text = ""
 
-        if opcode in (0x00FC, 0x00FD, 0x0204):  # SST, LABELSST, LABEL
-            chunk = wb[payload_off:payload_end]
+    secrets: List[str] = []
+
+    # 1) 기존 룰(정규식) 기반 추출(텍스트에서 value만)
+    try:
+        from server.core.normalize import normalization_text
+        norm = normalization_text(text)
+        for _s, _e, val, _meta in find_sensitive_spans(norm):
+            v = str(val or "").strip()
+            if len(v) >= 2:
+                secrets.append(v)
+    except Exception:
+        pass
+
+    # 2) NER spans에서 텍스트 추출
+    if spans and isinstance(text, str) and text:
+        n = len(text)
+        for sp in spans:
+            if not isinstance(sp, dict):
+                continue
+            s = sp.get("start")
+            e = sp.get("end")
+            if s is None or e is None:
+                continue
             try:
-                text = chunk.decode("utf-16le", errors="ignore") or chunk.decode("cp949", errors="ignore")
-                red = apply_redaction_rules(text)
-                enc = red.encode("utf-16le")
-                wb[payload_off:payload_end] = enc[:length].ljust(length, b"\x00")
+                s = int(s)
+                e = int(e)
             except Exception:
-                pass
+                continue
+            s = max(0, min(n, s))
+            e = max(0, min(n, e))
+            if e <= s:
+                continue
+            seg = text[s:e].strip()
+            if len(seg) >= 2:
+                secrets.append(seg)
 
-        off = payload_end
+    # 3) 정리
+    if not secrets:
+        return file_bytes
+    uniq: List[str] = []
+    seen: Set[str] = set()
+    for s in sorted(secrets, key=lambda x: (-len(x), x)):
+        if s not in seen:
+            seen.add(s)
+            uniq.append(s)
 
-    return bytes(wb)
+    try:
+        return redact_ole_bin_preserve_size(file_bytes, uniq, mask_preview=False)
+    except Exception:
+        return file_bytes
 
 def extract_text(file_bytes: bytes) -> dict:
     """text_api.py 에서 호출되는 공통 인터페이스"""
