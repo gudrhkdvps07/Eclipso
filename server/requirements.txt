@@ -11,3 +11,4 @@ pymupdf4llm==0.2.7
 numpy==2.2.6
 easyocr==1.7.2
 ollama==0.6.1
+
