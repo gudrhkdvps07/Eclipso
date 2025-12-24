@@ -54,6 +54,11 @@ def _is_cfbf(h: bytes) -> bool:
 
 # --------- 동일 길이 치환 유틸(시크릿/이메일) ---------
 def utf16_same_len_replace_with_logs(data: bytes, old: str):
+    """UTF-16LE 동일 길이 치환.
+
+    - 기본은 '*'로 마스킹
+    - 단, '-' / '@' (및 전각 '＠')는 원문 그대로 유지
+    """
     old_u16 = old.encode("utf-16le")
     ba = bytearray(data)
     cnt = 0
@@ -61,15 +66,23 @@ def utf16_same_len_replace_with_logs(data: bytes, old: str):
     n = len(old_u16)
     if n == 0:
         return data, 0
+
+    KEEP = {"-", "@", "＠"}
+    masked = "".join(ch if ch in KEEP else "*" for ch in old)
+    repl_u16 = masked.encode("utf-16le")
+
+    # (안전) surrogate pair 등으로 길이가 달라지면 구버전처럼 전체 마스킹
+    if len(repl_u16) != n:
+        repl_u16 = ("*" * (n // 2)).encode("utf-16le")
+
     while True:
         j = ba.find(old_u16, i)
         if j == -1:
             break
-        ba[j : j + n] = ("*" * (n // 2)).encode("utf-16le")
+        ba[j : j + n] = repl_u16
         cnt += 1
         i = j + n
     return bytes(ba), cnt
-
 
 def visible_replace_keep_len_with_logs(data: bytes, old: str):
     changed, direct = utf16_same_len_replace_with_logs(data, old)
@@ -104,7 +117,8 @@ def visible_replace_keep_len_with_logs(data: bytes, old: str):
             filled = 0
             while p < k and filled < m:
                 if u16[p] >= 0x20:
-                    u16[p] = 0x002A
+                    if u16[p] not in (0x002D, 0x0040):  # '-' / '@'
+                        u16[p] = 0x002A
                     filled += 1
                 p += 1
             total += 1
@@ -172,13 +186,16 @@ def _mask_emails_ascii_same_len(b: bytes) -> Tuple[bytes, int]:
                 had_dot = True
             R += 1
         if L < i and R > i + 1 and had_dot:
-            ba[L:R] = b"*" * (R - L)
+            for p in range(L, R):
+                # '@'(0x40), '-'(0x2D)는 유지
+                if ba[p] in (0x40, 0x2D):
+                    continue
+                ba[p] = 0x2A  # '*'
             hits += 1
             i = R
         else:
             i += 1
     return bytes(ba), hits
-
 
 def _mask_emails_utf16le_same_len(b: bytes) -> Tuple[bytes, int]:
     if len(b) < 4 or (len(b) % 2):
@@ -219,13 +236,15 @@ def _mask_emails_utf16le_same_len(b: bytes) -> Tuple[bytes, int]:
             R += 1
         if L < i and R > i + 1 and had_dot:
             for p in range(L, R):
-                u[p] = 0x002A
+                # '@'(0x0040), '-'(0x002D)는 유지
+                if u[p] in (0x0040, 0x002D):
+                    continue
+                u[p] = 0x002A  # '*'
             hits += 1
             i = R
         else:
             i += 1
     return struct.pack("<" + "H" * len(u), *u), hits
-
 
 def get_root_entry(ole):
     for e in ole.direntries:
