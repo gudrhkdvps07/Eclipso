@@ -333,23 +333,66 @@ def _boxes_from_index_span(index: dict, start: int, end: int) -> List[Box]:
 
 def extract_markdown(pdf_bytes: bytes) -> dict:
     if pymupdf4llm is None:
-        return {"ok": False, "markdown": ""}
+        return {"ok": False, "markdown": "", "pages": []}
 
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         try:
-            md = pymupdf4llm.to_markdown(doc)
-            return {"ok": True, "markdown": md}
+            # 수정: force_tables 대신 tables=True를 사용하고, 
+            # 텍스트 추출 시 더 견고한 chunk 접근 방식을 사용합니다.
+            chunks = pymupdf4llm.to_markdown(doc, tables=True, page_chunks=True, show_progress=False)
+            
+            pages = []
+            full_md = []
+            for i, chunk in enumerate(chunks):
+                # chunk가 dict인 경우와 string인 경우 모두 대응
+                if isinstance(chunk, dict):
+                    md_text = chunk.get("markdown") or chunk.get("text") or ""
+                else:
+                    md_text = str(chunk)
+                
+                pages.append({"page": i + 1, "markdown": md_text})
+                full_md.append(md_text)
+            
+            return {
+                "ok": True, 
+                "markdown": "\n\n".join(full_md),
+                "pages": pages
+            }
         finally:
             doc.close()
-    except Exception:
+    except Exception as e:
+        logger.error(f"PDF to Markdown error (fitz): {e}")
         pass
 
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as f:
-        f.write(pdf_bytes)
-        f.flush()
-        md = pymupdf4llm.to_markdown(f.name)
-        return {"ok": True, "markdown": md}
+    # fallback (임시 파일 방식)
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            f.write(pdf_bytes)
+            tmp_name = f.name
+        
+        try:
+            chunks = pymupdf4llm.to_markdown(tmp_name, tables=True, page_chunks=True, show_progress=False)
+            pages = []
+            full_md = []
+            for i, chunk in enumerate(chunks):
+                if isinstance(chunk, dict):
+                    md_text = chunk.get("markdown") or chunk.get("text") or ""
+                else:
+                    md_text = str(chunk)
+                pages.append({"page": i + 1, "markdown": md_text})
+                full_md.append(md_text)
+            
+            return {
+                "ok": True, 
+                "markdown": "\n\n".join(full_md),
+                "pages": pages
+            }
+        finally:
+            if os.path.exists(tmp_name):
+                os.remove(tmp_name)
+    except Exception as e:
+        return {"ok": False, "markdown": "", "pages": [], "error": str(e)}
 
 
 def detect_boxes_from_patterns(pdf_bytes: bytes, patterns: List[PatternItem]) -> List[Box]:

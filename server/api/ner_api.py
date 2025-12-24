@@ -252,7 +252,6 @@ def _merge_entities(ents: List[Dict[str, Any]], merge_gap: int) -> List[Dict[str
     return merged
 
 
-
 def _ensure_pad_token(tokenizer: Any, model: Any) -> None:
     try:
         if getattr(tokenizer, "pad_token_id", None) is not None:

@@ -25,24 +25,50 @@ let state = {
   detections: [],
   detectionById: new Map(),
 
-  selectedGroup: 'ALL',
   selectedId: null,
 
-  redactReady: false,
-  lastRedactedBlob: null,
-  lastRedactedName: 'redacted.bin',
+  filters: { q: '', seg: 'all' },
 
-  filters: {
-    src: 'all', // all | regex | ner
-    val: 'all', // all | ok | fail
-    q: '',
-  },
+  ui: {},
+}
 
-  ui: {
-    busy: false,
-    uploadCollapsed: false,
-    uploadToggleEnabled: false,
-  },
+/** ---------- Safe DOM helpers (핵심: null 방지) ---------- */
+const byId = (id) => document.getElementById(id)
+
+function safeText(id, v) {
+  const el = byId(id)
+  if (!el) return
+  el.textContent = String(v ?? '')
+}
+
+function safeHtml(id, html) {
+  const el = byId(id)
+  if (!el) return
+  el.innerHTML = String(html ?? '')
+}
+
+function safeShow(id, show = true) {
+  const el = byId(id)
+  if (!el) return
+  el.classList.toggle('hidden', !show)
+}
+
+function safeClassRemove(id, cls) {
+  const el = byId(id)
+  if (!el) return
+  el.classList.remove(cls)
+}
+
+function safeWidthPct(id, pct) {
+  const el = byId(id)
+  if (!el) return
+  el.style.width = pct
+}
+
+function safeToggleHidden(id) {
+  const el = byId(id)
+  if (!el) return
+  el.classList.toggle('hidden')
 }
 
 /** ---------- Utils ---------- */
@@ -57,40 +83,50 @@ function setStatus(msg) {
   if (el) el.textContent = msg || ''
 }
 
-function showLoading(msg) {
-  // 파일 업로드 전(또는 파일 없는 상태)에는 로딩 오버레이를 띄우지 않음
-  const hasFile = !!state?.file || !!$('#file')?.files?.[0]
-  if (!hasFile) return
-
-  const ov = $('#loading-overlay')
-  const txt = $('#loading-text')
-  if (txt) txt.textContent = String(msg || '동작 중...')
-  if (ov) ov.classList.remove('hidden')
-
-  state.ui.busy = true
-
-  // 동작 중엔 입력 잠금(업로드/옵션 변경 방지)
-  $('#btn-scan') && ($('#btn-scan').disabled = true)
-  $('#file') && ($('#file').disabled = true)
-  $$('input[name="rule"]').forEach((el) => (el.disabled = true))
-  ;['#ner-show-ps', '#ner-show-lc', '#ner-show-og'].forEach((sel) => {
-    const el = $(sel)
-    if (el) el.disabled = true
-  })
+function safeJson(v) {
+  try {
+    return JSON.stringify(v ?? null)
+  } catch {
+    return null
+  }
 }
 
-function hideLoading() {
-  const ov = $('#loading-overlay')
-  if (ov) ov.classList.add('hidden')
-  state.ui.busy = false
+function parseContentDispositionFilename(cd) {
+  // supports: filename="a.pdf" / filename*=UTF-8''%E3%85...
+  if (!cd) return null
+  const s = String(cd)
+  const mStar = s.match(/filename\*\s*=\s*([^;]+)/i)
+  if (mStar) {
+    const v = mStar[1].trim()
+    const m = v.match(/utf-8''(.+)/i)
+    if (m) {
+      try {
+        return decodeURIComponent(m[1].replace(/^"|"$/g, ''))
+      } catch {
+        return m[1].replace(/^"|"$/g, '')
+      }
+    }
+    return v.replace(/^"|"$/g, '')
+  }
+  const m = s.match(/filename\s*=\s*([^;]+)/i)
+  if (!m) return null
+  return m[1].trim().replace(/^"|"$/g, '')
+}
 
-  // 입력 잠금 해제
-  $('#btn-scan') && ($('#btn-scan').disabled = false)
-  $('#file') && ($('#file').disabled = false)
-  $$('input[name="rule"]').forEach((el) => (el.disabled = false))
+function buildRedactedFallbackName(original) {
+  const name = String(original || 'redacted')
+  const dot = name.lastIndexOf('.')
+  if (dot <= 0) return `${name}_redacted`
+  return `${name.slice(0, dot)}_redacted${name.slice(dot)}`
+}
+
+function lockInputs(on) {
+  $('#btn-scan') && ($('#btn-scan').disabled = !!on)
+  $('#file') && ($('#file').disabled = !!on)
+  $$('input[name="rule"]').forEach((el) => (el.disabled = !!on))
   ;['#ner-show-ps', '#ner-show-lc', '#ner-show-og'].forEach((sel) => {
     const el = $(sel)
-    if (el) el.disabled = false
+    if (el) el.disabled = !!on
   })
 }
 
@@ -117,177 +153,34 @@ function updatePageControls() {
   if (next) next.disabled = idx >= total - 1
 }
 
-function renderCurrentPage() {
-  updatePageControls()
-  const md = state.pages[state.pageIndex] ?? ''
-  renderMarkdownToViewer(md, state.detections)
-  clearViewerSelection()
-}
-
-function setUploadCollapsed(on) {
-  const grid = $('#layout-grid')
-  if (!grid) return
-  const next = !!on
-  state.ui.uploadCollapsed = next
-  grid.classList.toggle('upload-collapsed', next)
-
-  const btn = $('#btn-toggle-upload')
-  if (btn) btn.textContent = next ? '업로드 패널 보이기' : '업로드 패널 숨기기'
-}
-
-function enableUploadToggle(on) {
-  state.ui.uploadToggleEnabled = !!on
-  const btn = $('#btn-toggle-upload')
-  if (!btn) return
-  btn.classList.toggle('hidden', !on)
-}
-
-function badge(sel, n) {
-  const el = $(sel)
-  if (el) el.textContent = String(n ?? 0)
-}
-
-function onlyDigits(s) {
-  return String(s || '').replace(/\D+/g, '')
-}
-
-function pad2(n) {
-  return String(n).padStart(2, '0')
-}
-
-function nowIso() {
-  return new Date().toISOString()
-}
-
-function formatIsoToLocalKorean(iso) {
-  if (!iso) return '-'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return String(iso)
-  const y = d.getFullYear()
-  const m = pad2(d.getMonth() + 1)
-  const day = pad2(d.getDate())
-  const hh = pad2(d.getHours())
-  const mm = pad2(d.getMinutes())
-  return `${y}-${m}-${day} (${hh}:${mm})`
-}
-
-const JOIN_NEWLINE_RE = /([\w\uAC00-\uD7A3.%+\-/])\n([\w\uAC00-\uD7A3.%+\-/])/g
-function joinBrokenLines(text) {
-  if (!text) return ''
-  let t = String(text).replace(/\r\n/g, '\n')
-  let prev = null
-  while (prev !== t) {
-    prev = t
-    t = t.replace(JOIN_NEWLINE_RE, '$1$2')
-  }
-  return t
-}
-
-/** ---------- UI Reset ---------- */
-function resetUiAll() {
-  hideLoading()
-  enableUploadToggle(false)
-  setUploadCollapsed(false)
-  setPages([''])
-
-  // blocks
-  $('#doc-viewer-block')?.classList.add('hidden')
-  $('#detect-block')?.classList.add('hidden')
-  $('#inspector-block')?.classList.add('hidden')
-  $('#stats-report-block')?.classList.add('hidden')
-
-  // viewer
+function clearViewerSelection() {
   const viewer = $('#doc-viewer')
-  if (viewer) viewer.innerHTML = ''
-  $('#doc-meta') && ($('#doc-meta').textContent = '-')
-  $('#doc-detect-count') && ($('#doc-detect-count').textContent = '0')
-
-  // detect
-  const rail = $('#bookmark-rail')
-  if (rail) rail.innerHTML = ''
-  const items = $('#bookmark-items')
-  if (items) items.innerHTML = ''
-  $('#detect-sub') && ($('#detect-sub').textContent = '-')
-  $('#detect-badge') && ($('#detect-badge').textContent = '0')
-  $('#detect-search') && ($('#detect-search').value = '')
-
-  // inspector
-  $('#inspector-empty')?.classList.remove('hidden')
-  $('#inspector-body')?.classList.add('hidden')
-  $('#btn-jump') && ($('#btn-jump').disabled = true)
-
-  // buttons
-  const applyBtn = $('#btn-apply-redact')
-  if (applyBtn) applyBtn.disabled = true
-  const saveBtn = $('#btn-save-redacted')
-  if (saveBtn) {
-    saveBtn.disabled = true
-    saveBtn.classList.add('hidden')
-  }
-
-  // stats JSON
-  $('#stats-json')?.classList.add('hidden')
-  if ($('#stats-json')) $('#stats-json').textContent = ''
-
-  // state
-  state = {
-    ...state,
-    t0: null,
-    timings: null,
-    extractedText: '',
-    markdown: '',
-    normalizedText: '',
-    matchData: null,
-    nerItems: [],
-    detections: [],
-    detectionById: new Map(),
-    selectedGroup: 'ALL',
-    selectedId: null,
-    redactReady: false,
-    lastRedactedBlob: null,
-    filters: { src: 'all', val: 'all', q: '' },
-  }
-
-  setStatus('대기 중')
+  if (!viewer) return
+  viewer.querySelectorAll('.pii-box[data-selected="1"]').forEach((el) => {
+    el.removeAttribute('data-selected')
+    el.classList.remove(
+      'ring-4',
+      'ring-indigo-500/20',
+      'ring-offset-2',
+      'ring-offset-white'
+    )
+  })
 }
 
-/** ---------- Rules & Policies ---------- */
-async function loadRules() {
-  try {
-    const r = await fetch(`${API_BASE()}/text/rules`)
-    if (!r.ok) throw 0
-    const rules = await r.json()
-    const box = $('#rules-container')
-    if (!box) return
-    box.innerHTML = ''
-    for (const rule of rules) {
-      const el = document.createElement('label')
-      el.className = 'flex items-center gap-2'
-      el.innerHTML = `<input type="checkbox" name="rule" value="${escHtml(
-        rule
-      )}" checked><span>${escHtml(rule)}</span>`
-      box.appendChild(el)
-    }
-  } catch {
-    // 기본값 유지
-  }
-}
-
-function selectedRuleNames() {
-  return $$('input[name="rule"]:checked').map((el) => el.value)
-}
-
-function selectedNerLabels() {
-  const labels = []
-  $('#ner-show-ps')?.checked !== false && labels.push('PS')
-  $('#ner-show-lc')?.checked !== false && labels.push('LC')
-  $('#ner-show-og')?.checked !== false && labels.push('OG')
-  return labels
-}
-
-function selectedMaskingPolicy() {
-  const ps = $('#mask-ps')?.value || 'full'
-  return { ps }
+function applyViewerSelection(id) {
+  const viewer = $('#doc-viewer')
+  if (!viewer) return
+  const spans = viewer.querySelectorAll(`.pii-box[data-id="${CSS.escape(id)}"]`)
+  spans.forEach((el) => {
+    el.setAttribute('data-selected', '1')
+    el.classList.add(
+      'ring-4',
+      'ring-indigo-500/20',
+      'ring-offset-2',
+      'ring-offset-white'
+    )
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  })
 }
 
 /** ---------- Dropzone ---------- */
@@ -360,43 +253,48 @@ function setupDropZone() {
   input.addEventListener('change', (e) => showName(e.target.files?.[0] || null))
 }
 
-/** ---------- Markdown fetch + normalize ---------- */
-function normalizeMarkdownResponse(mdData) {
-  let markdown = ''
-  if (!mdData) return ''
-  if (typeof mdData.markdown === 'string') markdown = mdData.markdown
-  else if (Array.isArray(mdData.pages_md))
-    markdown = mdData.pages_md.join('\n\n')
-  else if (Array.isArray(mdData.pages))
-    markdown = mdData.pages.map((p) => p.markdown || '').join('\n\n')
-  return String(markdown || '')
-}
-
-async function fetchMarkdown(file) {
+/** ---------- Rules & Policies ---------- */
+async function loadRules() {
   try {
-    const fd = new FormData()
-    fd.append('file', file)
-    const r = await fetch(`${API_BASE()}/text/markdown`, {
-      method: 'POST',
-      body: fd,
-    })
-    if (!r.ok) return null
-    const mdData = await r.json()
-    const md = normalizeMarkdownResponse(mdData)
-    return md && md.trim() ? md : null
+    const r = await fetch(`${API_BASE()}/text/rules`)
+    if (!r.ok) throw 0
+    const rules = await r.json()
+    const box = $('#rules-container')
+    if (!box) return
+    box.innerHTML = ''
+    for (const rule of rules) {
+      const el = document.createElement('label')
+      el.className =
+        'flex items-center gap-2 cursor-pointer hover:text-indigo-600 transition'
+      el.innerHTML = `<input type="checkbox" name="rule" value="${escHtml(
+        rule
+      )}" checked class="rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"><span>${escHtml(
+        rule
+      )}</span>`
+      box.appendChild(el)
+    }
   } catch {
-    return null
+    // 기본값 유지
   }
 }
 
+function selectedRuleNames() {
+  return $$('input[name="rule"]:checked').map((el) => el.value)
+}
+
+function selectedNerLabels() {
+  const labels = []
+  $('#ner-show-ps')?.checked !== false && labels.push('PS')
+  $('#ner-show-lc')?.checked !== false && labels.push('LC')
+  $('#ner-show-og')?.checked !== false && labels.push('OG')
+  return labels
+}
+
+/** ---------- Markdown fallback ---------- */
 function fallbackMarkdownFromText(text) {
-  // 코드펜스(``` )는 HTML span 삽입(하이라이트)을 "글자 그대로" 출력시키므로 사용하지 않는다.
-  // 텍스트는 안전하게 escape하고, 줄바꿈은 <br>로 유지한다.
-  const safe = escHtml(String(text || ''))
+  return escHtml(String(text || ''))
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
-    .replace(/\n/g, '<br/>')
-  return `<div class="doc-text">${safe}</div>`
 }
 
 /** ---------- Match / NER ---------- */
@@ -492,7 +390,6 @@ function buildDetections(matchData, nerItems, nerAllowLabels) {
   const mdItems = Array.isArray(matchData?.items) ? matchData.items : []
   const ner = Array.isArray(nerItems) ? nerItems : []
 
-  // regex
   for (const it of mdItems) {
     const id = makeId()
     const kind = ruleToKind(it?.rule)
@@ -511,7 +408,6 @@ function buildDetections(matchData, nerItems, nerAllowLabels) {
     })
   }
 
-  // ner
   for (const it of ner) {
     const lab = String(it?.label || '').toUpperCase()
     if (!allow.has(lab)) continue
@@ -530,7 +426,6 @@ function buildDetections(matchData, nerItems, nerAllowLabels) {
     })
   }
 
-  // 정렬(문서 내 순서 우선)
   out.sort((a, b) => {
     const as = a.start ?? 1e18
     const bs = b.start ?? 1e18
@@ -544,27 +439,26 @@ function buildDetections(matchData, nerItems, nerAllowLabels) {
 }
 
 /**
- * bbox 없으니, MD 문자열에 inline HTML span을 삽입해서 "텍스트 박스"로 표시.
- * start/end 기반 정확 위치 매핑은 MD 변환 과정에서 깨질 수 있어(정확하지 않음),
- * 여기서는 “순서 기반 substring 탐색”으로 넣는다.
+ * bbox 없으니, MD 문자열에 inline HTML span을 삽입해서 표시.
  */
 function injectBoxesIntoMarkdown(md, detections) {
   let s = String(md || '')
   if (!s.trim() || !detections?.length) return s
-
-  // 이미 삽입된 경우 중복 방지
   if (s.includes('class="pii-box"')) return s
 
-  let cursor = 0
+  const tags = []
+  s = s.replace(/<[^>]+>/g, (match) => {
+    const placeholder = `__TAG_${tags.length}__`
+    tags.push(match)
+    return placeholder
+  })
 
+  let cursor = 0
   for (const d of detections) {
     const needle = String(d.text || '').trim()
-    if (!needle) continue
-    // 너무 짧은 토큰(예: "s")은 문서 전체에서 과도하게 매칭되어 박스가 폭발하므로 스킵
-    if (needle.length < 2) continue
+    if (!needle || needle.length < 2) continue
     if (/^[A-Za-z]$/.test(needle)) continue
 
-    // 순서 기반 탐색
     let idx = s.indexOf(needle, cursor)
     if (idx < 0) idx = s.indexOf(needle, 0)
     if (idx < 0) continue
@@ -574,11 +468,19 @@ function injectBoxesIntoMarkdown(md, detections) {
 
     const tag =
       d.source === 'regex'
-        ? `REGEX·${d.kind || 'UNKNOWN'}`
+        ? `REGEX·${d.kind || 'UNK'}`
         : `NER·${d.label || 'UNK'}`
 
+    const baseCls =
+      'pii-box inline px-[2px] rounded-md cursor-pointer align-baseline'
+    const clsOk =
+      'bg-indigo-500/10 shadow-[inset_0_0_0_2px_rgba(79,70,229,0.95)]'
+    const clsFail =
+      'bg-gray-500/10 shadow-[inset_0_0_0_2px_rgba(107,114,128,0.95)] opacity-70'
+    const cls = `${baseCls} ${d.valid ? clsOk : clsFail}`
+
     const attrs = [
-      `class="pii-box${d.valid ? '' : ' pii-fail'}"`,
+      `class="${cls}"`,
       `data-id="${escHtml(d.id)}"`,
       `data-source="${escHtml(d.source)}"`,
       d.kind ? `data-kind="${escHtml(d.kind)}"` : '',
@@ -589,11 +491,17 @@ function injectBoxesIntoMarkdown(md, detections) {
       .filter(Boolean)
       .join(' ')
 
-    const wrapped = `<span ${attrs}>${escHtml(needle)}</span>`
-
+    const pill = `<span class="ml-1 inline-block px-1.5 py-0.5 rounded-full text-[10px] font-bold align-[2px] bg-gray-900/5 text-gray-900">${escHtml(
+      tag
+    )}</span>`
+    const wrapped = `<span ${attrs}>${escHtml(needle)}${pill}</span>`
     s = before + wrapped + after
     cursor = (before + wrapped).length
   }
+
+  tags.forEach((tag, i) => {
+    s = s.replace(`__TAG_${i}__`, tag)
+  })
 
   return s
 }
@@ -602,21 +510,31 @@ function renderMarkdownToViewer(md, detections) {
   const viewer = $('#doc-viewer')
   if (!viewer) return
 
-  const md2 = injectBoxesIntoMarkdown(md, detections)
+  const md2 = injectBoxesIntoMarkdown(
+    normalizeTsvTablesToMarkdown(md),
+    detections
+  )
 
-  // Marked: GFM tables on
   let html = ''
   try {
-    // 줄바꿈 보존: 문서(특히 표/셀 내 줄바꿈)에서 개행을 그대로 렌더링
     marked.setOptions({ gfm: true, breaks: true })
     html = marked.parse(md2)
   } catch {
     html = `<pre>${escHtml(md2)}</pre>`
   }
 
-  // DOMPurify: span + data-* 허용
   const clean = DOMPurify.sanitize(html, {
-    ADD_TAGS: ['span'],
+    ADD_TAGS: [
+      'span',
+      'table',
+      'thead',
+      'tbody',
+      'tr',
+      'th',
+      'td',
+      'colgroup',
+      'col',
+    ],
     ADD_ATTR: [
       'class',
       'data-id',
@@ -625,288 +543,398 @@ function renderMarkdownToViewer(md, detections) {
       'data-label',
       'data-valid',
       'data-tag',
+      'colspan',
+      'rowspan',
     ],
   })
 
-  // A4 비율 “페이지” 컨테이너로 렌더링
-  viewer.innerHTML = `<div class="doc-page"><div class="doc-page-inner">${clean}</div></div>`
+  viewer.innerHTML = clean
+  applyMarkdownTailwind(viewer)
 }
 
-/** ---------- Bookmarks UI ---------- */
-function groupKeyOf(d) {
-  if (!d) return 'OTHER'
-  if (d.source === 'regex') return d.kind || 'UNKNOWN'
-  if (d.source === 'ner') return d.label || 'NER'
-  return 'OTHER'
-}
+function applyMarkdownTailwind(viewer) {
+  if (!viewer) return
 
-function groupTitleOf(key) {
-  if (key === 'ALL') return '전체'
-  return String(key)
-}
-
-function groupOrderScore(key) {
-  const k = String(key)
-  const order = {
-    ALL: 0,
-    주민등록번호: 1,
-    외국인등록번호: 2,
-    카드번호: 3,
-    계좌번호: 4,
-    전화번호: 5,
-    이메일: 6,
-    여권번호: 7,
-    운전면허번호: 8,
-    PS: 20,
-    LC: 21,
-    OG: 22,
-    UNKNOWN: 99,
-  }
-  return order[k] ?? 50
-}
-
-function renderBookmarks(detections) {
-  const rail = $('#bookmark-rail')
-  if (!rail) return
-
-  const groups = new Map()
-  groups.set('ALL', { key: 'ALL', count: detections.length })
-
-  for (const d of detections) {
-    const key = groupKeyOf(d)
-    const prev = groups.get(key) || { key, count: 0 }
-    prev.count++
-    groups.set(key, prev)
+  const add = (sel, classes) => {
+    const cls = String(classes).split(/\s+/).filter(Boolean)
+    viewer.querySelectorAll(sel).forEach((el) => el.classList.add(...cls))
   }
 
-  const list = Array.from(groups.values()).sort(
-    (a, b) =>
-      groupOrderScore(a.key) - groupOrderScore(b.key) || b.count - a.count
+  add('h1', 'text-2xl font-semibold mt-6 mb-3 tracking-tight')
+  add('h2', 'text-xl font-semibold mt-5 mb-2 tracking-tight')
+  add('h3', 'text-lg font-semibold mt-4 mb-2')
+  add('p', 'my-2')
+  add('ul', 'my-2 pl-5 list-disc')
+  add('ol', 'my-2 pl-5 list-decimal')
+  add('li', 'my-1')
+  add('blockquote', 'my-3 pl-4 border-l-4 border-gray-200 text-gray-600')
+  add('a', 'text-blue-600 underline break-words')
+  add('hr', 'my-4 border-gray-200')
+
+  add(
+    'pre',
+    'my-3 bg-[#0b1220] text-gray-200 p-3 rounded-xl overflow-visible whitespace-pre-wrap break-words border border-white/10'
   )
+  add('code', 'font-mono text-[12px]')
 
-  rail.innerHTML = ''
-  for (const g of list) {
-    const btn = document.createElement('button')
-    btn.type = 'button'
-    btn.className = 'bm'
-    btn.dataset.key = g.key
-    btn.dataset.active = g.key === state.selectedGroup ? '1' : '0'
-    btn.innerHTML = `${escHtml(groupTitleOf(g.key))} <small>(${
-      g.count
-    })</small>`
-    btn.addEventListener('click', () => {
-      state.selectedGroup = g.key
-      rail.querySelectorAll('.bm').forEach((x) => (x.dataset.active = '0'))
-      btn.dataset.active = '1'
-      renderBookmarkItems()
+  add('table', 'w-full border-collapse my-2 text-[12px]')
+  add('th', 'border border-gray-200 px-2 py-1 text-left bg-gray-50 align-top')
+  add('td', 'border border-gray-200 px-2 py-1 align-top')
+}
+
+function normalizeTsvTablesToMarkdown(md) {
+  const src = String(md || '')
+  if (!src) return src
+  if (src.includes('<table')) return src
+
+  const lines = src.split('\n')
+  const out = []
+  let inFence = false
+
+  const escCell = (s) => String(s ?? '').replace(/\|/g, '\\|')
+  const toPipeRow = (cells) => `| ${cells.map(escCell).join(' | ')} |`
+
+  const emitTable = (rows) => {
+    if (!rows || rows.length < 2) return false
+    const hasSeparator = rows.some(
+      (row) => row.length >= 2 && row.every((cell) => /^[ \-\:]+$/.test(cell))
+    )
+    if (hasSeparator) return false
+
+    const colCount = Math.max(...rows.map((r) => r.length))
+    if (colCount < 2) return false
+    const norm = rows.map((r) => {
+      const rr = r.slice(0, colCount)
+      while (rr.length < colCount) rr.push('')
+      return rr
     })
-    rail.appendChild(btn)
+    const header = norm[0]
+    const body = norm.slice(1)
+    const sep = Array.from({ length: colCount }, () => '---')
+    out.push('', toPipeRow(header), toPipeRow(sep))
+    for (const r of body) out.push(toPipeRow(r))
+    out.push('')
+    return true
+  }
+
+  const splitBySpaces = (line) =>
+    line
+      .trimEnd()
+      .split(/\s{2,}/)
+      .map((c) => c.trim())
+  const splitByPipe = (line) => {
+    const s = String(line || '').trim()
+    const core = s.replace(/^\|/, '').replace(/\|$/, '')
+    return core.split('|').map((c) => c.trim())
+  }
+
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    const fence = line.trim().startsWith('```')
+    if (fence) {
+      inFence = !inFence
+      out.push(line)
+      i++
+      continue
+    }
+    if (inFence) {
+      out.push(line)
+      i++
+      continue
+    }
+
+    if (line.includes('\t')) {
+      const run = []
+      while (
+        i < lines.length &&
+        lines[i].includes('\t') &&
+        lines[i].trim() !== ''
+      ) {
+        run.push(lines[i])
+        i++
+      }
+      if (run.length >= 2) {
+        if (emitTable(run.map((l) => l.split('\t').map((c) => c.trim()))))
+          continue
+      }
+      out.push(...run)
+      continue
+    }
+
+    if (
+      line.includes('|') &&
+      line.trim() !== '' &&
+      splitByPipe(line).length >= 2
+    ) {
+      const run = []
+      while (
+        i < lines.length &&
+        lines[i].trim() !== '' &&
+        lines[i].includes('|') &&
+        splitByPipe(lines[i]).length >= 2
+      ) {
+        run.push(lines[i])
+        i++
+      }
+      if (run.length >= 2) {
+        if (emitTable(run.map(splitByPipe))) continue
+      }
+      out.push(...run)
+      continue
+    }
+
+    const looksSpaceTableRow =
+      /\s{2,}/.test(line) &&
+      splitBySpaces(line).length >= 2 &&
+      line.trim() !== ''
+    if (looksSpaceTableRow) {
+      const run = []
+      while (
+        i < lines.length &&
+        lines[i].trim() !== '' &&
+        /\s{2,}/.test(lines[i]) &&
+        splitBySpaces(lines[i]).length >= 2
+      ) {
+        run.push(lines[i])
+        i++
+      }
+      if (run.length >= 3) {
+        if (emitTable(run.map(splitBySpaces))) continue
+      }
+      out.push(...run)
+      continue
+    }
+
+    out.push(line)
+    i++
+  }
+  return out.join('\n')
+}
+
+function applyDocOrientationHint(md, viewerEl = null) {
+  const pageEl = document.getElementById('doc-page')
+  if (!pageEl) return
+  let orient = 'portrait'
+  const src = String(md || '')
+  if (src.includes('<table')) orient = 'landscape'
+  else {
+    for (const line of src.split('\n')) {
+      if (line.includes('|')) {
+        const cols = line.split('|').filter(Boolean).length
+        if (cols >= 4) {
+          orient = 'landscape'
+          break
+        }
+      }
+    }
+  }
+  const v = viewerEl || document.getElementById('doc-viewer')
+  if (v && v.querySelectorAll('table').length > 0) orient = 'landscape'
+  pageEl.classList.toggle('max-w-[1018px]', orient === 'landscape')
+  pageEl.classList.toggle('max-w-[680px]', orient !== 'landscape')
+}
+
+/** ---------- Match / NER Results (right panel) ---------- */
+function setActiveResultItem(id) {
+  $$('.hit-btn').forEach((el) => {
+    el.classList.remove('border-gray-900', 'ring-2', 'ring-gray-900/20')
+  })
+  $$('.ner-row').forEach((el) => {
+    el.classList.remove('bg-indigo-50')
+  })
+  if (!id) return
+  const btn = $(`.hit-btn[data-id="${CSS.escape(id)}"]`)
+  if (btn) {
+    btn.classList.add('border-gray-900', 'ring-2', 'ring-gray-900/20')
+    btn.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }
+  const row = $(`.ner-row[data-id="${CSS.escape(id)}"]`)
+  if (row) {
+    row.classList.add('bg-indigo-50')
+    row.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }
 }
 
-function applyFilterButtons(kind, value) {
-  if (kind === 'src') {
-    state.filters.src = value
-    ;['flt-src-all', 'flt-src-regex', 'flt-src-ner'].forEach((id) => {
-      const b = $('#' + id)
-      if (!b) return
-      const active = b.dataset.value === value
-      b.classList.toggle('bg-zinc-900', active)
-      b.classList.toggle('text-white', active)
-      b.classList.toggle('hover:bg-zinc-50', !active)
-    })
-  } else if (kind === 'val') {
-    state.filters.val = value
-    ;['flt-val-all', 'flt-val-ok', 'flt-val-fail'].forEach((id) => {
-      const b = $('#' + id)
-      if (!b) return
-      const active = b.dataset.value === value
-      b.classList.toggle('bg-zinc-900', active)
-      b.classList.toggle('text-white', active)
-      b.classList.toggle('hover:bg-zinc-50', !active)
-    })
-  }
-  renderBookmarkItems()
+function updateSegButtons(seg) {
+  const all = document.getElementById('seg-all')
+  const ok = document.getElementById('seg-ok')
+  const fail = document.getElementById('seg-fail')
+  if (!all || !ok || !fail) return
+
+  all.className =
+    'px-3 py-1.5 text-xs ' +
+    (seg === 'all'
+      ? 'bg-gray-900 text-white'
+      : 'text-gray-700 hover:bg-gray-50')
+  ok.className =
+    'px-3 py-1.5 text-xs ' +
+    (seg === 'ok'
+      ? 'bg-gray-900 text-white'
+      : 'text-emerald-700 hover:bg-emerald-50')
+  fail.className =
+    'px-3 py-1.5 text-xs ' +
+    (seg === 'fail'
+      ? 'bg-gray-900 text-white'
+      : 'text-rose-700 hover:bg-rose-50')
 }
 
-function detectionPassesFilters(d) {
-  if (state.selectedGroup !== 'ALL') {
-    if (groupKeyOf(d) !== state.selectedGroup) return false
-  }
+function renderMatchResults() {
+  const groups = $('#match-groups')
+  if (!groups) return
 
-  if (state.filters.src !== 'all' && d.source !== state.filters.src)
-    return false
-
-  if (state.filters.val === 'ok' && !d.valid) return false
-  if (state.filters.val === 'fail' && d.valid) return false
-
+  const seg = state.filters.seg || 'all'
   const q = String(state.filters.q || '')
     .trim()
     .toLowerCase()
+
+  let items = state.detections.filter((d) => d.source === 'regex')
+  if (seg === 'ok') items = items.filter((d) => d.valid)
+  if (seg === 'fail') items = items.filter((d) => !d.valid)
   if (q) {
-    const hay = `${d.text} ${d.kind || ''} ${d.label || ''} ${
-      d.rule || ''
-    }`.toLowerCase()
-    if (!hay.includes(q)) return false
+    items = items.filter((d) =>
+      `${d.text} ${d.kind || ''} ${d.rule || ''}`.toLowerCase().includes(q)
+    )
   }
 
-  return true
-}
+  const total = state.detections.filter((d) => d.source === 'regex').length
+  const ok = state.detections.filter(
+    (d) => d.source === 'regex' && d.valid
+  ).length
+  const fail = total - ok
 
-function renderBookmarkItems() {
-  const wrap = $('#bookmark-items')
-  if (!wrap) return
-  wrap.innerHTML = ''
+  const summary = $('#summary')
+  if (summary) summary.textContent = `총 ${total} · OK ${ok} · FAIL ${fail}`
 
-  const filtered = state.detections.filter(detectionPassesFilters)
-
-  if (!filtered.length) {
-    wrap.innerHTML =
-      '<div class="text-sm text-zinc-500 border border-zinc-200 rounded-2xl p-4">표시할 항목이 없습니다.</div>'
+  groups.innerHTML = ''
+  if (!items.length) {
+    groups.innerHTML =
+      '<div class="text-[12px] text-gray-400 p-3 text-center">표시할 항목이 없습니다.</div>'
     return
   }
 
-  for (const d of filtered) {
-    const card = document.createElement('button')
-    card.type = 'button'
-    card.className =
-      'w-full text-left border border-zinc-200 rounded-2xl p-3 hover:bg-zinc-50 transition'
-    card.dataset.id = d.id
+  const byKind = new Map()
+  for (const d of items) {
+    const k = d.kind || 'UNKNOWN'
+    if (!byKind.has(k)) byKind.set(k, [])
+    byKind.get(k).push(d)
+  }
 
-    const leftTag =
-      d.source === 'regex'
-        ? `REGEX · ${d.kind || 'UNKNOWN'}`
-        : `NER · ${d.label || 'UNK'}`
-    const pos = d.start != null && d.end != null ? `${d.start}-${d.end}` : '-'
-    const okFail = d.valid ? 'OK' : 'FAIL'
+  for (const [k, arr] of byKind.entries()) {
+    const card = document.createElement('div')
+    card.className = 'rounded-xl border border-gray-200 overflow-hidden'
+    card.innerHTML = `<div class="px-3 py-2 text-xs font-semibold bg-gray-50">${escHtml(
+      k
+    )} <span class="ml-1 text-gray-400 font-normal">${arr.length}</span></div>`
 
-    card.innerHTML = `
-      <div class="flex items-start justify-between gap-3">
-        <div class="min-w-0">
-          <div class="flex flex-wrap items-center gap-2">
-            <span class="pill" data-source="${escHtml(d.source)}">${escHtml(
-      leftTag
-    )}</span>
-            <span class="text-[11px] font-extrabold ${
-              d.valid ? 'text-emerald-700' : 'text-rose-700'
-            }">${okFail}</span>
-            <span class="text-[11px] text-zinc-500 font-mono">${escHtml(
-              pos
-            )}</span>
+    const body = document.createElement('div')
+    body.className = 'p-2 space-y-2'
+    for (const d of arr) {
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className =
+        'hit-btn w-full text-left border border-gray-200 rounded-xl px-3 py-2 bg-white hover:bg-gray-50 transition'
+      btn.dataset.id = d.id
+
+      const badge = d.valid
+        ? '<span class="text-[10px] font-semibold text-emerald-700">OK</span>'
+        : '<span class="text-[10px] font-semibold text-rose-700">FAIL</span>'
+      btn.innerHTML = `
+        <div class="flex items-start justify-between gap-2">
+          <div class="min-w-0">
+            <div class="text-[10px] opacity-50">${escHtml(d.rule || '')}</div>
+            <div class="truncate text-sm">${escHtml(d.text)}</div>
           </div>
-          <div class="mt-2 text-sm font-mono break-all text-zinc-950">${escHtml(
-            d.text
-          )}</div>
+          <div class="shrink-0">${badge}</div>
         </div>
-        <div class="shrink-0 text-xs text-zinc-400 font-extrabold">클릭</div>
-      </div>
+      `
+      btn.addEventListener('click', () => {
+        state.selectedId = d.id
+        setActiveResultItem(d.id)
+        clearViewerSelection()
+        applyViewerSelection(d.id)
+      })
+      body.appendChild(btn)
+    }
+    card.appendChild(body)
+    groups.appendChild(card)
+  }
+}
+
+function renderNerResults() {
+  const rows = $('#ner-rows')
+  if (!rows) return
+
+  const items = state.detections.filter((d) => d.source === 'ner')
+
+  const scores = items
+    .map((d) => (typeof d.score === 'number' ? d.score : null))
+    .filter((x) => x != null)
+  const avg = scores.length
+    ? scores.reduce((a, b) => a + b, 0) / scores.length
+    : null
+  const sum = $('#ner-summary')
+  if (sum) sum.textContent = `총 ${items.length} · 평균 score ${Score(avg)}`
+
+  rows.innerHTML = ''
+  for (const d of items) {
+    const tr = document.createElement('tr')
+    tr.className = 'ner-row border-b hover:bg-gray-50 cursor-pointer'
+    tr.dataset.id = d.id
+    tr.innerHTML = `
+      <td class="py-2 px-2 font-semibold">${escHtml(d.label || '')}</td>
+      <td class="py-2 px-2">${escHtml(d.text)}</td>
+      <td class="py-2 px-2 font-mono">${escHtml(Score(d.score))}</td>
+      <td class="py-2 px-2 font-mono text-[12px] opacity-70">${escHtml(
+        `${d.start ?? '-'}-${d.end ?? '-'}`
+      )}</td>
     `
-
-    card.addEventListener('click', () => {
-      selectDetection(d.id, true)
+    tr.addEventListener('click', () => {
+      state.selectedId = d.id
+      setActiveResultItem(d.id)
+      clearViewerSelection()
+      applyViewerSelection(d.id)
     })
-
-    wrap.appendChild(card)
+    rows.appendChild(tr)
   }
 }
 
-/** ---------- Inspector + Selection ---------- */
-function clearViewerSelection() {
-  const viewer = $('#doc-viewer')
-  if (!viewer) return
-  viewer.querySelectorAll('.pii-box.pii-selected').forEach((el) => {
-    el.classList.remove('pii-selected')
-  })
-}
+function setMatchTab(tab) {
+  const t = tab === 'ner' ? 'ner' : 'regex'
+  state.ui = state.ui || {}
+  state.ui.matchTab = t
 
-function applyViewerSelection(id) {
-  const viewer = $('#doc-viewer')
-  if (!viewer) return
-  const spans = viewer.querySelectorAll(`.pii-box[data-id="${CSS.escape(id)}"]`)
-  spans.forEach((el) => el.classList.add('pii-selected'))
-  const first = spans[0]
-  if (first && typeof first.scrollIntoView === 'function') {
-    first.scrollIntoView({
-      block: 'center',
-      inline: 'nearest',
-      behavior: 'auto',
-    })
+  const paneRegex = $('#match-pane-regex')
+  const paneNer = $('#match-pane-ner')
+  paneRegex && paneRegex.classList.toggle('hidden', t !== 'regex')
+  paneNer && paneNer.classList.toggle('hidden', t !== 'ner')
+
+  const label = $('#match-tab-label')
+  if (label) label.textContent = t === 'regex' ? '정규식' : 'NER'
+
+  const badge = $('#match-badge')
+  if (badge) {
+    const n =
+      t === 'regex'
+        ? state.detections.filter((d) => d.source === 'regex').length
+        : state.detections.filter((d) => d.source === 'ner').length
+    badge.textContent = String(n)
   }
 }
 
-function renderInspector(d) {
-  $('#inspector-block')?.classList.remove('hidden')
-
-  const empty = $('#inspector-empty')
-  const body = $('#inspector-body')
-  if (!d) {
-    empty?.classList.remove('hidden')
-    body?.classList.add('hidden')
-    $('#btn-jump') && ($('#btn-jump').disabled = true)
-    return
-  }
-
-  empty?.classList.add('hidden')
-  body?.classList.remove('hidden')
-
-  const title =
-    d.source === 'regex'
-      ? `${d.kind || 'UNKNOWN'} (정규식)`
-      : `${d.label || 'UNK'} (NER)`
-
-  const sub =
-    d.source === 'regex'
-      ? `rule=${d.rule || '-'} · valid=${d.valid}`
-      : `score=${d.score ?? '-'}`
-  const pos = d.start != null && d.end != null ? `${d.start}-${d.end}` : '-'
-  const scoreLine =
-    d.source === 'regex'
-      ? `valid=${d.valid ? 'true' : 'false'}`
-      : `score=${typeof d.score === 'number' ? d.score.toFixed(4) : '-'}`
-
-  $('#insp-title') && ($('#insp-title').textContent = title)
-  $('#insp-sub') && ($('#insp-sub').textContent = sub)
-  const pill = $('#insp-pill')
-  if (pill) {
-    pill.dataset.source = d.source
-    pill.textContent =
-      d.source === 'regex'
-        ? `REGEX · ${d.kind || 'UNKNOWN'}`
-        : `NER · ${d.label || 'UNK'}`
-  }
-  $('#insp-text') && ($('#insp-text').textContent = d.text || '-')
-  $('#insp-pos') && ($('#insp-pos').textContent = pos)
-  $('#insp-score') && ($('#insp-score').textContent = scoreLine)
-
-  const jumpBtn = $('#btn-jump')
-  if (jumpBtn) {
-    jumpBtn.disabled = false
-    jumpBtn.onclick = () => applyViewerSelection(d.id)
-  }
+function wireMatchTabs() {
+  const prev = $('#btn-match-prev')
+  const next = $('#btn-match-next')
+  if (prev)
+    prev.addEventListener('click', () =>
+      setMatchTab((state.ui?.matchTab || 'regex') === 'regex' ? 'ner' : 'regex')
+    )
+  if (next)
+    next.addEventListener('click', () =>
+      setMatchTab((state.ui?.matchTab || 'regex') === 'regex' ? 'ner' : 'regex')
+    )
 }
 
-function selectDetection(id, alsoJump = false) {
-  const d = state.detectionById.get(id)
-  if (!d) return
-  state.selectedId = id
-
-  clearViewerSelection()
-  applyViewerSelection(id)
-
-  $('#bookmark-items')
-    ?.querySelectorAll('button[data-id]')
-    .forEach((b) => {
-      const on = b.dataset.id === id
-      b.classList.toggle('ring-2', on)
-      b.style.setProperty('--tw-ring-color', on ? '#4f46e5' : '')
-    })
-
-  renderInspector(d)
-
-  if (alsoJump) applyViewerSelection(id)
-}
-
-/** ---------- Click: viewer span -> inspector ---------- */
 function wireViewerClick() {
   const viewer = $('#doc-viewer')
   if (!viewer) return
@@ -915,585 +943,238 @@ function wireViewerClick() {
     if (!sp) return
     const id = sp.getAttribute('data-id')
     if (!id) return
-    selectDetection(id, false)
+    state.selectedId = id
+    clearViewerSelection()
+    applyViewerSelection(id)
+    setActiveResultItem(id)
+    const d = state.detectionById?.get(id)
+    if (d?.source === 'ner') setMatchTab('ner')
+    else setMatchTab('regex')
   })
 }
 
-/** ---------- Masking segmented UI ---------- */
-function wireMaskButtons() {
-  $$('.mask-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const target = btn.dataset.target
-      const value = btn.dataset.value
-      const input = document.getElementById(target)
-      if (input) input.value = value
-
-      const group = btn.parentElement
-      if (!group) return
-      group.querySelectorAll('.mask-btn').forEach((b) => {
-        const active = b.dataset.value === value
-        b.classList.toggle('bg-zinc-900', active)
-        b.classList.toggle('text-white', active)
-      })
-    })
-  })
+/** ---------- Stats & Report ---------- */
+function pad2(n) {
+  return String(n).padStart(2, '0')
 }
-
-/** ---------- Stats (기존 로직 유지: 최소 수정) ---------- */
-function riskWeights() {
-  return {
-    주민등록번호: 30,
-    외국인등록번호: 30,
-    카드번호: 25,
-    계좌번호: 20,
-    운전면허번호: 18,
-    여권번호: 18,
-    전화번호: 10,
-    이메일: 8,
-    PS: 2,
-    LC: 5,
-    OG: 3,
-  }
+function formatIsoToLocalKorean(iso) {
+  if (!iso) return '-'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return String(iso)
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(
+    d.getDate()
+  )} (${pad2(d.getHours())}:${pad2(d.getMinutes())})`
 }
-
 function Score(v) {
   if (typeof v !== 'number' || !Number.isFinite(v)) return '-'
-  const t = Math.floor(v * 100) / 100
-  return t.toFixed(2)
+  return v.toFixed(2)
 }
 
-function overlapRatio(a, b) {
-  const a0 = Number(a?.start ?? -1)
-  const a1 = Number(a?.end ?? -1)
-  const b0 = Number(b?.start ?? -1)
-  const b1 = Number(b?.end ?? -1)
-  if (!(a1 > a0 && b1 > b0)) return 0
-  const inter = Math.max(0, Math.min(a1, b1) - Math.max(a0, b0))
-  const denom = Math.min(a1 - a0, b1 - b0)
-  if (denom <= 0) return 0
-  return inter / denom
-}
-
-function computeScanStats({
-  file,
-  ext,
-  rules,
-  nerLabels,
-  matchData,
-  nerItems,
-  timings,
-}) {
-  const weights = riskWeights()
+function computeScanStats({ matchData, nerItems, nerLabels, timings }) {
   const mdItems = Array.isArray(matchData?.items) ? matchData.items : []
   const ner = Array.isArray(nerItems) ? nerItems : []
+  const allow = new Set((nerLabels || []).map((x) => String(x).toUpperCase()))
 
-  // regex ok/fail
-  let regex_ok = 0
-  let regex_fail = 0
-  const fail_reason_counts = {}
-
-  function luhnValid(numStr) {
-    const s = onlyDigits(numStr)
-    if (s.length < 12) return false
-    let sum = 0
-    let alt = false
-    for (let i = s.length - 1; i >= 0; i--) {
-      let n = s.charCodeAt(i) - 48
-      if (n < 0 || n > 9) return false
-      if (alt) {
-        n *= 2
-        if (n > 9) n -= 9
-      }
-      sum += n
-      alt = !alt
-    }
-    return sum % 10 === 0
-  }
-
-  function emailLooksValid(v) {
-    const s = String(v || '').trim()
-    if (!s.includes('@')) return false
-    const parts = s.split('@')
-    if (parts.length !== 2) return false
-    const [local, domain] = parts
-    if (!local || !domain) return false
-    if (domain.startsWith('.') || domain.endsWith('.')) return false
-    if (!domain.includes('.')) return false
-    return true
-  }
-
-  function rrnLooksValidFormat(v) {
-    const d = onlyDigits(v)
-    return d.length === 13
-  }
-
-  function phoneLooksValid(v) {
-    const d = onlyDigits(v)
-    return d.length >= 9 && d.length <= 11
-  }
-
-  function inferFailReason(rule, value) {
-    const r = String(rule || '').toLowerCase()
-    const v = String(value || '')
-
-    if (r.includes('card')) {
-      if (!onlyDigits(v)) return '숫자 외 문자 포함'
-      if (!luhnValid(v)) return 'Luhn 불일치'
-      return '검증 로직 불일치'
-    }
-    if (r.includes('email')) {
-      if (!emailLooksValid(v)) return '이메일 형식 불일치'
-      return '검증 로직 불일치'
-    }
-    if (r.includes('rrn')) {
-      if (!rrnLooksValidFormat(v)) return '자리수/형식 불일치'
-      return '체크섬 불일치'
-    }
-    if (r.includes('fgn')) {
-      const d = onlyDigits(v)
-      if (d.length !== 13) return '자리수/형식 불일치'
-      return '체크섬 불일치'
-    }
-    if (r.includes('phone') || r.includes('tel') || r.includes('mobile')) {
-      if (!phoneLooksValid(v)) return '전화번호 자리수/형식 불일치'
-      return '검증 로직 불일치'
-    }
-    if (r.includes('passport')) return '여권번호 형식/국가규칙 불일치'
-    if (r.includes('driver')) return '면허번호 형식/지역규칙 불일치'
-    return '검증 실패(원인 미분류)'
-  }
-
-  for (const it of mdItems) {
-    if (it?.valid === true) regex_ok++
-    else if (it?.valid === false) {
-      regex_fail++
-      const reason = inferFailReason(it?.rule, it?.value)
-      fail_reason_counts[reason] = (fail_reason_counts[reason] || 0) + 1
-    }
-  }
-
-  const fail_top3 =
-    Object.entries(fail_reason_counts)
-      .sort((a, b) => (b[1] || 0) - (a[1] || 0))
-      .slice(0, 3)
-      .map(([k, v]) => `${k} ${v}`)
-      .join(' / ') || '-'
-
-  // by_kind (valid=true 기준)
+  let regex_ok = 0,
+    regex_fail = 0
   const by_kind = {}
   for (const it of mdItems) {
-    if (it?.valid === false) continue
-    const k = ruleToKind(it?.rule)
-    by_kind[k] = (by_kind[k] || 0) + 1
+    if (it?.valid) {
+      regex_ok++
+      const k = ruleToKind(it.rule)
+      by_kind[k] = (by_kind[k] || 0) + 1
+    } else regex_fail++
   }
 
-  // by_label (선택 라벨)
-  const allow = new Set((nerLabels || []).map((x) => String(x).toUpperCase()))
   const by_label = {}
-  const scoreAgg = {}
+  const scores = []
+  let nerAllowedCount = 0
   for (const it of ner) {
     const lab = String(it?.label || '').toUpperCase()
     if (!allow.has(lab)) continue
+    nerAllowedCount++
     by_label[lab] = (by_label[lab] || 0) + 1
-    if (typeof it?.score === 'number' && Number.isFinite(it.score)) {
-      ;(scoreAgg[lab] ??= []).push(it.score)
-    }
+    if (typeof it?.score === 'number') scores.push(it.score)
   }
 
-  const nerAvg = {}
-  for (const lab of ['PS', 'LC', 'OG']) {
-    const arr = scoreAgg[lab] || []
-    if (!arr.length) nerAvg[lab] = '-'
-    else {
-      const avg = arr.reduce((a, b) => a + b, 0) / arr.length
-      nerAvg[lab] = Score(avg)
-    }
-  }
-
-  // Unique 병합(대략)
-  const spans = []
-  for (const it of mdItems) {
-    if (it?.valid === false) continue
-    const s = Number(it?.start ?? -1)
-    const e = Number(it?.end ?? -1)
-    if (!(e > s)) continue
-    spans.push({ start: s, end: e, source: 'regex' })
-  }
-  for (const it of ner) {
-    const lab = String(it?.label || '').toUpperCase()
-    if (!allow.has(lab)) continue
-    const s = Number(it?.start ?? -1)
-    const e = Number(it?.end ?? -1)
-    if (!(e > s)) continue
-    spans.push({ start: s, end: e, source: 'ner' })
-  }
-  spans.sort((a, b) => a.start - b.start || a.end - b.end)
-
-  const clusters = []
-  for (const sp of spans) {
-    const last = clusters.length ? clusters[clusters.length - 1] : null
-    if (!last) {
-      clusters.push({
-        start: sp.start,
-        end: sp.end,
-        has_regex: sp.source === 'regex',
-        has_ner: sp.source === 'ner',
-      })
-      continue
-    }
-    const ratio = overlapRatio(last, sp)
-    if (ratio >= 0.8 || sp.start <= last.end) {
-      last.start = Math.min(last.start, sp.start)
-      last.end = Math.max(last.end, sp.end)
-      if (sp.source === 'regex') last.has_regex = true
-      if (sp.source === 'ner') last.has_ner = true
-    } else {
-      clusters.push({
-        start: sp.start,
-        end: sp.end,
-        has_regex: sp.source === 'regex',
-        has_ner: sp.source === 'ner',
-      })
-    }
-  }
-
-  const total_raw = spans.length
-  const total_unique = clusters.length
-  const overlap_count = clusters.filter((c) => c.has_regex && c.has_ner).length
-  const overlap_rate = total_unique ? overlap_count / total_unique : 0
-  const regex_unique = clusters.filter((c) => c.has_regex).length
-  const ner_unique = clusters.filter((c) => c.has_ner).length
-
-  let raw = 0
-  for (const [k, v] of Object.entries(by_kind))
-    raw += (weights[k] || 0) * (v || 0)
-  for (const [lab, v] of Object.entries(by_label))
-    raw += (weights[lab] || 0) * (v || 0)
-  const risk_score_0_100 = Math.max(0, Math.min(100, Math.round(raw)))
-
-  // 탐지된 규칙/라벨
-  const detectedRules = new Set()
-  for (const it of mdItems) {
-    if (it?.valid !== false && it?.rule)
-      detectedRules.add(String(it.rule).toLowerCase())
-  }
-  const detectedLabels = new Set(
-    Object.keys(by_label || {}).map((l) => l.toUpperCase())
-  )
+  // (기존 로직 유지) 점수는 지표일 뿐이니 대충: 정규식 OK 가중 + NER 허용 라벨 수 가중
+  const risk = Math.min(100, Math.round(regex_ok * 10 + nerAllowedCount * 2))
+  const nerAvg = scores.length
+    ? scores.reduce((a, b) => a + b, 0) / scores.length
+    : null
 
   return {
-    version: 'scan-report-v1',
-    created_at: nowIso(),
-    document: {
-      name: file?.name || '-',
-      ext: String(ext || '').toLowerCase(),
-      size_bytes: typeof file?.size === 'number' ? file.size : null,
-    },
-    policy: {
-      rules: Array.isArray(rules) ? rules : [],
-      ner_labels: Array.isArray(nerLabels) ? nerLabels : [],
-    },
-    timings: { ...(timings || {}) },
-    stats: {
-      risk_score_0_100,
-      total_raw,
-      total_unique,
-      regex_unique,
-      ner_unique,
-      overlap_count,
-      overlap_rate,
-      by_kind,
-      by_label,
-      ner_avg: nerAvg,
-      regex_ok,
-      regex_fail,
-      fail_top3,
-      fail_reason_counts,
-      detected_rules: Array.from(detectedRules),
-      detected_labels: Array.from(detectedLabels),
-    },
+    risk_score: risk,
+    total_raw: mdItems.length + nerAllowedCount,
+    total_unique: Array.isArray(state.detections) ? state.detections.length : 0,
+    regex_ok,
+    regex_fail,
+    by_kind,
+    by_label,
+    ner_avg: Score(nerAvg),
+    timings: timings || {},
   }
 }
 
-function fmtMs(v) {
-  if (typeof v !== 'number' || !Number.isFinite(v)) return '-'
-  return `${Math.round(v)}ms`
+function renderScanReport(stats) {
+  if (!stats) return
+
+  // stats 블록은 있어도 되고 없어도 됨(없으면 그냥 스킵)
+  safeShow('stats-report-block', true)
+
+  safeText('stats-risk-score', stats.risk_score)
+  safeWidthPct('stats-risk-meter', `${stats.risk_score}%`)
+  safeText('stats-total-unique', stats.total_unique)
+  safeText('stats-total-raw', stats.total_raw)
+  safeText('stats-regex-ok', stats.regex_ok)
+  safeText('stats-regex-fail', stats.regex_fail)
+  safeText('stats-ner-avg', stats.ner_avg)
+
+  const kindBody = byId('stats-by-kind-rows')
+  if (kindBody) {
+    kindBody.innerHTML = Object.entries(stats.by_kind || {})
+      .sort((a, b) => b[1] - a[1])
+      .map(
+        ([k, v]) =>
+          `<tr>
+            <td class="py-2 pl-4 pr-2 font-medium text-zinc-900">${escHtml(
+              k
+            )}</td>
+            <td class="py-2 pr-5 text-right font-bold text-zinc-500">${escHtml(
+              v
+            )}</td>
+          </tr>`
+      )
+      .join('')
+  }
+
+  const labelBody = byId('stats-by-label-rows')
+  if (labelBody) {
+    labelBody.innerHTML = Object.entries(stats.by_label || {})
+      .sort((a, b) => b[1] - a[1])
+      .map(
+        ([k, v]) =>
+          `<tr>
+            <td class="py-2 pl-4 pr-2 font-medium text-zinc-900">${escHtml(
+              k
+            )}</td>
+            <td class="py-2 pr-5 text-right font-bold text-zinc-500">${escHtml(
+              v
+            )}</td>
+          </tr>`
+      )
+      .join('')
+  }
+
+  safeText('t-extract', Math.round(stats.timings.extract_ms || 0) + 'ms')
+  safeText('t-match', Math.round(stats.timings.match_ms || 0) + 'ms')
+  safeText('t-ner', Math.round(stats.timings.ner_ms || 0) + 'ms')
+  safeText('t-redact', Math.round(stats.timings.redact_ms || 0) + 'ms')
+  safeText('t-total', Math.round(stats.timings.total_ms || 0) + 'ms')
+
+  // 정책(선택한 규칙/라벨 표시)
+  const selectedRules = Array.isArray(state.rules) ? state.rules : []
+  const selectedNer = Array.isArray(state.nerLabels) ? state.nerLabels : []
+
+  const detectedRuleSet = new Set()
+  const mdItems = Array.isArray(state.matchData?.items)
+    ? state.matchData.items
+    : []
+  for (const it of mdItems) {
+    if (it?.valid === false) continue
+    if (!it?.rule) continue
+    detectedRuleSet.add(String(it.rule))
+  }
+
+  const rulesBox = byId('stats-policy-rules')
+  if (rulesBox) {
+    rulesBox.innerHTML = selectedRules
+      .map((r) => {
+        const isHit = detectedRuleSet.has(String(r))
+        const label = ruleToKind(r)
+        const cls = isHit
+          ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+          : 'border-gray-200 bg-gray-50 text-gray-600'
+        return `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full border text-[11px] ${cls}">${escHtml(
+          label
+        )}</span>`
+      })
+      .join('')
+  }
+
+  const nerBox = byId('stats-policy-nerlabels')
+  if (nerBox) {
+    nerBox.innerHTML = selectedNer
+      .map(
+        (lab) =>
+          `<span class="inline-flex items-center px-2 py-1 rounded-full border border-gray-200 bg-gray-50 text-gray-600 text-[11px]">${escHtml(
+            String(lab).toUpperCase()
+          )}</span>`
+      )
+      .join('')
+  }
+
+  safeText('stats-json', JSON.stringify(stats, null, 2))
 }
 
-function renderChips(containerEl, list, detectedSet = null) {
-  if (!containerEl) return
-  containerEl.innerHTML = ''
-  const arr = Array.isArray(list) ? list : []
-  if (!arr.length) {
-    containerEl.innerHTML = `<span class="text-[12px] text-zinc-500">-</span>`
-    return
-  }
-  for (const v of arr) {
-    const span = document.createElement('span')
-    const vLower = String(v).toLowerCase()
-    const vUpper = String(v).toUpperCase()
-    const isDetected =
-      detectedSet && (detectedSet.has(vLower) || detectedSet.has(vUpper))
-    if (isDetected) {
-      span.className =
-        'text-[11px] px-2 py-1 rounded-full border font-extrabold'
-      span.style.borderColor = 'rgba(14,165,233,0.35)'
-      span.style.backgroundColor = 'rgba(14,165,233,0.12)'
-      span.style.color = '#0f172a'
-    } else {
-      span.className =
-        'text-[11px] px-2 py-1 rounded-full border border-zinc-200 bg-zinc-50 text-zinc-800'
-    }
-    span.textContent = String(v)
-    containerEl.appendChild(span)
-  }
-}
-
-function renderScanReport(report) {
-  if (!report) return
-  $('#stats-report-block')?.classList.remove('hidden')
-
-  const doc = report.document || {}
-  const s = report.stats || {}
-  const t = report.timings || {}
-  const pol = report.policy || {}
-
-  const created = formatIsoToLocalKorean(report.created_at)
-  const subtitle = `${doc.name || '-'} · ${String(
-    doc.ext || ''
-  ).toUpperCase()} · ${
-    typeof doc.size_bytes === 'number' ? `${doc.size_bytes} bytes` : '-'
-  } · ${created}`
-  $('#stats-subtitle') && ($('#stats-subtitle').textContent = subtitle)
-
-  const risk = Number(s.risk_score_0_100 ?? 0)
-  $('#stats-risk-score') && ($('#stats-risk-score').textContent = String(risk))
-  const meter = $('#stats-risk-meter')
-  if (meter) meter.style.width = `${Math.max(0, Math.min(100, risk))}%`
-
-  $('#stats-total-unique') &&
-    ($('#stats-total-unique').textContent = String(s.total_unique ?? 0))
-  $('#stats-total-raw') &&
-    ($('#stats-total-raw').textContent = String(s.total_raw ?? 0))
-  $('#stats-overlap-rate') &&
-    ($('#stats-overlap-rate').textContent = `${Math.round(
-      (s.overlap_rate || 0) * 100
-    )}%`)
-
-  $('#stats-regex-unique') &&
-    ($('#stats-regex-unique').textContent = String(s.regex_unique ?? 0))
-  $('#stats-ner-unique') &&
-    ($('#stats-ner-unique').textContent = String(s.ner_unique ?? 0))
-
-  const nerAvg = s.ner_avg || {}
-  $('#stats-ner-avg') &&
-    ($('#stats-ner-avg').textContent = `PS ${nerAvg.PS || '-'} / LC ${
-      nerAvg.LC || '-'
-    } / OG ${nerAvg.OG || '-'}`)
-
-  $('#stats-regex-ok') &&
-    ($('#stats-regex-ok').textContent = String(s.regex_ok ?? 0))
-  $('#stats-regex-fail') &&
-    ($('#stats-regex-fail').textContent = String(s.regex_fail ?? 0))
-  $('#stats-fail-top') &&
-    ($('#stats-fail-top').textContent = s.fail_top3 || '-')
-
-  const detectedRules = new Set(
-    (s.detected_rules || []).map((r) => String(r).toLowerCase())
-  )
-  const detectedLabels = new Set(
-    (s.detected_labels || []).map((l) => String(l).toUpperCase())
-  )
-  renderChips($('#stats-policy-rules'), pol.rules, detectedRules)
-  renderChips($('#stats-policy-nerlabels'), pol.ner_labels, detectedLabels)
-
-  $('#t-extract') && ($('#t-extract').textContent = fmtMs(t.extract_ms))
-  $('#t-match') && ($('#t-match').textContent = fmtMs(t.match_ms))
-  $('#t-ner') && ($('#t-ner').textContent = fmtMs(t.ner_ms))
-  $('#t-redact') && ($('#t-redact').textContent = fmtMs(t.redact_ms))
-  $('#t-total') && ($('#t-total').textContent = fmtMs(t.total_ms))
-
-  const kindRows = $('#stats-by-kind-rows')
-  if (kindRows) {
-    kindRows.innerHTML = ''
-    const entries = Object.entries(s.by_kind || {}).sort(
-      (a, b) => (b[1] || 0) - (a[1] || 0)
-    )
-    if (!entries.length) {
-      const tr = document.createElement('tr')
-      tr.innerHTML = `<td class="py-2 px-3 text-zinc-500" colspan="2">없음</td>`
-      kindRows.appendChild(tr)
-    } else {
-      for (const [k, v] of entries) {
-        const tr = document.createElement('tr')
-        tr.className = 'border-b'
-        tr.innerHTML = `<td class="py-2 px-3">${escHtml(
-          k
-        )}</td><td class="py-2 px-3 text-right font-mono">${v}</td>`
-        kindRows.appendChild(tr)
-      }
-    }
-  }
-
-  const labelRows = $('#stats-by-label-rows')
-  if (labelRows) {
-    labelRows.innerHTML = ''
-    const entries = Object.entries(s.by_label || {}).sort(
-      (a, b) => (b[1] || 0) - (a[1] || 0)
-    )
-    if (!entries.length) {
-      const tr = document.createElement('tr')
-      tr.innerHTML = `<td class="py-2 px-3 text-zinc-500" colspan="2">없음</td>`
-      labelRows.appendChild(tr)
-    } else {
-      for (const [k, v] of entries) {
-        const tr = document.createElement('tr')
-        tr.className = 'border-b'
-        tr.innerHTML = `<td class="py-2 px-3">${escHtml(
-          k
-        )}</td><td class="py-2 px-3 text-right font-mono">${v}</td>`
-        labelRows.appendChild(tr)
-      }
-    }
-  }
-
-  const jsonEl = $('#stats-json')
-  if (jsonEl && !jsonEl.classList.contains('hidden')) {
-    jsonEl.textContent = JSON.stringify(report, null, 2)
-  }
-}
-
-/** ---------- Main: Scan / Redact ---------- */
+/** ---------- Main: Scan ---------- */
 async function doScan() {
   const f = $('#file')?.files?.[0]
   if (!f) return alert('파일을 선택하세요.')
-
-  resetUiAll()
 
   state.file = f
   state.ext = (f.name.split('.').pop() || '').toLowerCase()
   state.rules = selectedRuleNames()
   state.nerLabels = selectedNerLabels()
-
-  const ext = state.ext
-
-  state.lastRedactedName = f.name
-    ? f.name.replace(/\.[^.]+$/, `_redacted.${ext}`)
-    : `redacted.${ext}`
-
   state.t0 = performance.now()
-  state.timings = {
-    extract_ms: null,
-    match_ms: null,
-    ner_ms: null,
-    redact_ms: null,
-    total_ms: null,
-  }
 
-  setStatus('텍스트 변환중...')
-  showLoading('텍스트 변환중...')
-  const fd = new FormData()
-  fd.append('file', f)
+  setStatus('분석 시작...')
+  lockInputs(true)
 
-  const tExtract = performance.now()
   try {
+    const fd = new FormData()
+    fd.append('file', f)
+
+    const t1 = performance.now()
     const r1 = await fetch(`${API_BASE()}/text/extract`, {
       method: 'POST',
       body: fd,
     })
-    if (!r1.ok)
-      throw new Error(`텍스트 추출 실패 (${r1.status})\n${await r1.text()}`)
+    if (!r1.ok) throw new Error('추출 실패')
     const extractData = await r1.json()
-    state.timings.extract_ms = performance.now() - tExtract
+    state.timings = { extract_ms: performance.now() - t1 }
 
     const fullText = String(extractData.full_text || '')
     state.extractedText = fullText
 
-    // 페이지 기반 markdown 구성(PDF는 pages_md 우선)
-    const pagesMd = Array.isArray(extractData?.pages_md)
-      ? extractData.pages_md
-          .map((p) => (p && typeof p.markdown === 'string' ? p.markdown : ''))
-          .filter((x) => x && x.trim())
-      : []
+    const md = extractData.markdown || fallbackMarkdownFromText(fullText)
+    state.markdown = md
+    setPages([md])
 
-    const pagesText = Array.isArray(extractData?.pages)
-      ? extractData.pages
-          .map((p) => (p && typeof p.text === 'string' ? p.text : ''))
-          .filter((x) => x && x.trim())
-      : []
-
-    const mdSingle =
-      typeof extractData?.markdown === 'string' && extractData.markdown.trim()
-        ? extractData.markdown
-        : ''
-
-    const splitByFormFeed = (s) =>
-      String(s || '')
-        .split('\f')
-        .map((x) => x.trim())
-        .filter(Boolean)
-
-    const pages = pagesMd.length
-      ? pagesMd
-      : pagesText.length
-      ? pagesText.map((t) => fallbackMarkdownFromText(t))
-      : splitByFormFeed(mdSingle).length
-      ? splitByFormFeed(mdSingle)
-      : [mdSingle || fallbackMarkdownFromText(fullText)]
-
-    setPages(pages)
-    state.markdown = pages.join('\n\n')
-
-    const isLayoutPreserved = [
-      'pdf',
-      'hwpx',
-      'hwp',
-      'docx',
-      'doc',
-      'pptx',
-      'ppt',
-      'xlsx',
-      'xls',
-      'docm',
-      'pptm',
-      'xlsm',
-      'xml',
-      'txt',
-    ].includes(ext)
-    state.normalizedText = isLayoutPreserved
-      ? fullText
-      : joinBrokenLines(fullText)
-
-    setStatus('정규식 탐지중...')
-    showLoading('정규식 탐지중...')
-    const tMatch = performance.now()
+    const t2 = performance.now()
+    setStatus('패턴 탐색...')
     const r2 = await fetch(`${API_BASE()}/text/match`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        text: state.normalizedText,
+        text: fullText,
         rules: state.rules,
         normalize: true,
       }),
     })
-    if (!r2.ok) throw new Error(`매칭 실패 (${r2.status})\n${await r2.text()}`)
     const rawMatchData = await r2.json()
-    state.timings.match_ms = performance.now() - tMatch
+    state.timings.match_ms = performance.now() - t2
     state.matchData = filterMatchByRules(rawMatchData, state.rules)
 
-    setStatus('NER 탐지중...')
-    showLoading('NER 탐지중...')
-    const tNer = performance.now()
-    const excludeSpans = buildExcludeSpansFromMatch(state.matchData)
-    const nerResp = state.normalizedText.trim()
-      ? await requestNerSmart(
-          state.normalizedText,
-          excludeSpans,
-          state.nerLabels
-        )
-      : { items: [] }
-    state.timings.ner_ms = performance.now() - tNer
-    state.nerItems = Array.isArray(nerResp?.items) ? nerResp.items : []
+    const t3 = performance.now()
+    setStatus('NER 탐지...')
+    const nerResp = await requestNerSmart(
+      fullText,
+      buildExcludeSpansFromMatch(state.matchData),
+      state.nerLabels
+    )
+    state.timings.ner_ms = performance.now() - t3
+    state.nerItems = nerResp.items
 
     state.detections = buildDetections(
       state.matchData,
@@ -1502,224 +1183,174 @@ async function doScan() {
     )
     state.detectionById = new Map(state.detections.map((d) => [d.id, d]))
 
-    $('#doc-viewer-block')?.classList.remove('hidden')
-    $('#doc-meta') &&
-      ($('#doc-meta').textContent = `${
-        f.name
-      } · ${ext.toUpperCase()} · ${Math.max(1, Math.round(f.size / 1024))} KB`)
+    safeClassRemove('doc-viewer-block', 'hidden')
+    safeClassRemove('match-tabs-block', 'hidden')
+    safeText(
+      'doc-meta',
+      `${f.name} · ${state.ext.toUpperCase()} · ${Math.round(f.size / 1024)}KB`
+    )
+    safeText('doc-detect-count', state.detections.length)
+
+    // 오른쪽 badge(현재 탭은 setMatchTab에서 갱신)
+    const mb = byId('match-badge')
+    if (mb) {
+      mb.textContent = String(
+        state.detections.filter((d) => d.source === 'regex').length
+      )
+    }
 
     renderCurrentPage()
     wireViewerClick()
-
-    $('#doc-detect-count') &&
-      ($('#doc-detect-count').textContent = String(state.detections.length))
-    $('#doc-detect-count')?.classList.toggle('hidden', false)
-
-    $('#detect-block')?.classList.remove('hidden')
-    $('#detect-sub') &&
-      ($(
-        '#detect-sub'
-      ).textContent = `탐지 ${state.detections.length}건 · 클릭하면 문서에서 하이라이트로 이동`)
-    $('#detect-badge') &&
-      ($('#detect-badge').textContent = String(state.detections.length))
-
-    state.selectedGroup = 'ALL'
-    renderBookmarks(state.detections)
-    renderBookmarkItems()
+    renderMatchResults()
+    renderNerResults()
+    setMatchTab('regex')
 
     state.timings.total_ms = performance.now() - state.t0
-    const report = computeScanStats({
-      file: state.file,
-      ext: state.ext,
-      rules: state.rules,
-      nerLabels: state.nerLabels,
-      matchData: state.matchData,
-      nerItems: state.nerItems,
-      timings: state.timings,
-    })
-    renderScanReport(report)
+    renderScanReport(
+      computeScanStats({
+        matchData: state.matchData,
+        nerItems: state.nerItems,
+        nerLabels: state.nerLabels,
+        timings: state.timings,
+      })
+    )
 
-    state.redactReady = true
-    $('#btn-apply-redact') && ($('#btn-apply-redact').disabled = false)
+    setStatus('완료')
 
-    setStatus('탐지 완료')
-
-    // 탐지 완료 후에만 “업로드 패널 숨기기/보이기” 버튼 활성화
-    enableUploadToggle(true)
+    const btn = $('#btn-save-redacted')
+    if (btn) {
+      btn.classList.remove('hidden')
+      btn.disabled = false
+    }
+  } catch (e) {
+    console.error(e)
+    setStatus('오류 발생')
   } finally {
-    hideLoading()
+    lockInputs(false)
   }
 }
 
-async function doApplyRedact() {
-  if (!state.file || !state.redactReady) return
+/** ---------- Redact + Download ---------- */
+async function doRedactAndDownload() {
+  const f = $('#file')?.files?.[0]
+  if (!f) return alert('파일을 선택하세요.')
 
-  setStatus('레닥션 파일 생성 중...')
-  const tRedact = performance.now()
-
-  const fd = new FormData()
-  fd.append('file', state.file)
-
-  if (Array.isArray(state.rules) && state.rules.length) {
-    fd.append('rules_json', JSON.stringify(state.rules))
+  if (!state.file || state.file !== f || !state.extractedText) {
+    await doScan()
   }
-  if (Array.isArray(state.nerLabels) && state.nerLabels.length) {
-    fd.append('ner_labels_json', JSON.stringify(state.nerLabels))
-  }
-  if (Array.isArray(state.nerItems) && state.nerItems.length) {
-    fd.append('ner_entities_json', JSON.stringify(state.nerItems))
-  }
-  fd.append('masking_json', JSON.stringify(selectedMaskingPolicy()))
-
-  const r = await fetch(`${API_BASE()}/redact/file`, {
-    method: 'POST',
-    body: fd,
-  })
-  if (!r.ok) throw new Error(`레닥션 실패 (${r.status})\n${await r.text()}`)
-
-  const blob = await r.blob()
-  const ctype = r.headers.get('Content-Type') || 'application/octet-stream'
-  state.lastRedactedBlob = new Blob([blob], { type: ctype })
-
-  state.timings.redact_ms = performance.now() - tRedact
-  state.timings.total_ms = performance.now() - state.t0
-
-  const report = computeScanStats({
-    file: state.file,
-    ext: state.ext,
-    rules: state.rules,
-    nerLabels: state.nerLabels,
-    matchData: state.matchData,
-    nerItems: state.nerItems,
-    timings: state.timings,
-  })
-  renderScanReport(report)
+  if (!state.file) return
 
   const btn = $('#btn-save-redacted')
-  if (btn) {
-    btn.classList.remove('hidden')
-    btn.disabled = false
-  }
+  btn && (btn.disabled = true)
 
-  setStatus('레닥션 완료 — 다운로드 가능')
-}
+  setStatus('레닥션 실행 중...')
+  lockInputs(true)
 
-/** ---------- Download ---------- */
-function downloadRedacted() {
-  if (!state.lastRedactedBlob) return alert('레닥션된 파일이 없습니다.')
-  const url = URL.createObjectURL(state.lastRedactedBlob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = state.lastRedactedName || 'redacted_file'
-  a.click()
-  URL.revokeObjectURL(url)
-}
+  const t0 = performance.now()
+  try {
+    const fd = new FormData()
+    fd.append('file', state.file)
 
-/** ---------- Wire up ---------- */
-function wireDetectControls() {
-  $('#detect-search')?.addEventListener('input', (e) => {
-    state.filters.q = String(e.target.value || '')
-    renderBookmarkItems()
-  })
-  ;['flt-src-all', 'flt-src-regex', 'flt-src-ner'].forEach((id) => {
-    $('#' + id)?.addEventListener('click', (e) => {
-      applyFilterButtons('src', e.currentTarget.dataset.value)
+    const rulesJson = safeJson(state.rules || [])
+    const labelsJson = safeJson(state.nerLabels || [])
+    const entsJson = safeJson(state.nerItems || [])
+
+    rulesJson && fd.append('rules_json', rulesJson)
+    labelsJson && fd.append('ner_labels_json', labelsJson)
+    entsJson && fd.append('ner_entities_json', entsJson)
+
+    const r = await fetch(`${API_BASE()}/redact/file`, {
+      method: 'POST',
+      body: fd,
     })
-  })
-  ;['flt-val-all', 'flt-val-ok', 'flt-val-fail'].forEach((id) => {
-    $('#' + id)?.addEventListener('click', (e) => {
-      applyFilterButtons('val', e.currentTarget.dataset.value)
-    })
-  })
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  loadRules()
-  setupDropZone()
-  wireMaskButtons()
-  wireDetectControls()
-  setPages([''])
-
-  // 업로드 패널 토글(탐지 완료 후 활성화)
-  $('#btn-toggle-upload')?.addEventListener('click', () => {
-    if (!state.ui.uploadToggleEnabled) return
-    setUploadCollapsed(!state.ui.uploadCollapsed)
-  })
-
-  // 페이지 이동
-  $('#btn-page-prev')?.addEventListener('click', () => {
-    if (state.pageIndex > 0) {
-      state.pageIndex -= 1
-      renderCurrentPage()
+    if (!r.ok) {
+      const msg = await r.text().catch(() => '')
+      throw new Error(msg || '레닥션 실패')
     }
-  })
-  $('#btn-page-next')?.addEventListener('click', () => {
-    const total = Math.max(1, state.pages.length || 1)
-    if (state.pageIndex < total - 1) {
-      state.pageIndex += 1
-      renderCurrentPage()
-    }
-  })
 
-  $('#btn-scan')?.addEventListener('click', async () => {
-    try {
-      await doScan()
-    } catch (e) {
-      console.error(e)
-      setStatus(`오류: ${e.message || e}`)
-      hideLoading()
-    }
-  })
+    const blob = await r.blob()
+    const cd = r.headers.get('Content-Disposition')
+    const filename =
+      parseContentDispositionFilename(cd) ||
+      buildRedactedFallbackName(state.file?.name)
 
-  $('#btn-apply-redact')?.addEventListener('click', async () => {
-    try {
-      await doApplyRedact()
-    } catch (e) {
-      console.error(e)
-      setStatus(`오류: ${e.message || e}`)
-    }
-  })
-
-  $('#btn-save-redacted')?.addEventListener('click', downloadRedacted)
-
-  $('#btn-stats-json-toggle')?.addEventListener('click', () => {
-    const pre = $('#stats-json')
-    if (!pre) return
-    const nextHidden = !pre.classList.contains('hidden')
-    pre.classList.toggle('hidden', nextHidden)
-  })
-
-  $('#btn-stats-download')?.addEventListener('click', () => {
-    if (!state.file) return alert('리포트가 없습니다. 먼저 탐지를 실행하세요.')
-
-    const report = computeScanStats({
-      file: state.file,
-      ext: state.ext,
-      rules: state.rules,
-      nerLabels: state.nerLabels,
-      matchData: state.matchData,
-      nerItems: state.nerItems,
-      timings: state.timings,
-    })
-
-    const name0 = (report?.document?.name || 'report')
-      .replace(/\.[^.]+$/, '')
-      .slice(0, 120)
-    const outName = `${name0}_risk_report.json`
-
-    const blob = new Blob([JSON.stringify(report, null, 2)], {
-      type: 'application/json',
-    })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = outName
+    a.download = filename
+    document.body.appendChild(a)
     a.click()
-    URL.revokeObjectURL(url)
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1500)
+
+    state.timings = state.timings || {}
+    state.timings.redact_ms = performance.now() - t0
+    safeText('t-redact', Math.round(state.timings.redact_ms) + 'ms')
+
+    if (state.t0) {
+      state.timings.total_ms = performance.now() - state.t0
+      safeText('t-total', Math.round(state.timings.total_ms) + 'ms')
+    }
+
+    setStatus('레닥션 완료 · 다운로드 시작')
+  } catch (e) {
+    console.error(e)
+    alert(`레닥션 실패: ${e?.message || e}`)
+    setStatus('레닥션 오류')
+  } finally {
+    btn && (btn.disabled = false)
+    lockInputs(false)
+  }
+}
+
+function renderCurrentPage() {
+  updatePageControls()
+  renderMarkdownToViewer(state.markdown, state.detections)
+  applyDocOrientationHint(state.markdown, $('#doc-viewer'))
+}
+
+/** ---------- Init ---------- */
+document.addEventListener('DOMContentLoaded', () => {
+  loadRules()
+  setupDropZone()
+  wireMatchTabs()
+  updateSegButtons(state.filters.seg || 'all')
+
+  $('#file')?.addEventListener('change', () => {
+    const btn = $('#btn-save-redacted')
+    if (btn) {
+      btn.classList.add('hidden')
+      btn.disabled = true
+    }
+    state.file = $('#file')?.files?.[0] || null
+    state.extractedText = ''
+    state.markdown = ''
+    state.matchData = null
+    state.nerItems = []
+    state.detections = []
+    state.detectionById = new Map()
+    state.timings = null
+    state.t0 = null
+    setStatus('파일 선택됨 · 스캔 실행')
   })
-  ;['#ner-show-ps', '#ner-show-lc', '#ner-show-og'].forEach((sel) => {
-    $(sel)?.addEventListener('change', () => {
-      setStatus('NER 선택이 변경되었습니다. 다시 “탐지 실행”을 누르세요.')
+
+  $('#filter-search')?.addEventListener('input', (e) => {
+    state.filters.q = e.target.value
+    renderMatchResults()
+  })
+  ;['seg-all', 'seg-ok', 'seg-fail'].forEach((id) => {
+    const el = document.getElementById(id)
+    if (!el) return
+    el.addEventListener('click', () => {
+      state.filters.seg = el.dataset.seg || 'all'
+      updateSegButtons(state.filters.seg)
+      renderMatchResults()
     })
   })
+
+  $('#btn-scan')?.addEventListener('click', doScan)
+  $('#btn-save-redacted')?.addEventListener('click', doRedactAndDownload)
+  $('#btn-stats-json-toggle')?.addEventListener('click', () =>
+    safeToggleHidden('stats-json')
+  )
 })

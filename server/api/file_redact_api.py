@@ -135,7 +135,10 @@ async def redact_file(
 ):
     ext = Path(file.filename).suffix.lower()
     file_bytes = await file.read()
-    encoded_fileName = file.filename.encode("utf-8", "ignore").decode("latin-1", "ignore")
+    src_name = file.filename or f"redacted{ext or ''}"
+    stem = Path(src_name).stem or "redacted"
+    out_name = f"{stem}_redacted{ext or ''}"
+    encoded_fileName = out_name.encode("utf-8", "ignore").decode("latin-1", "ignore")
 
     rules: Optional[List[str]] = None
     ner_allowed: Optional[List[str]] = None
