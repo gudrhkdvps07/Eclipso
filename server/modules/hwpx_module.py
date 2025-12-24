@@ -1,22 +1,41 @@
 from __future__ import annotations
-import io, re, zipfile, logging
-from typing import List, Tuple, Optional
+
+import io
+import re
+import zipfile
+import logging
+from typing import Optional, List, Tuple
 
 try:
     from .common import (
-        cleanup_text, compile_rules, sub_text_nodes, chart_sanitize,
-        redact_embedded_xlsx_bytes, HWPX_DISABLE_CACHE
+        cleanup_text,
+        compile_rules,
+        sub_text_nodes,
+        chart_sanitize,
+        redact_embedded_xlsx_bytes,
+        HWPX_STRIP_PREVIEW,
+        HWPX_DISABLE_CACHE,
+        HWPX_BLANK_PREVIEW,
     )
-except Exception:
-    from server.modules.common import (
-        cleanup_text, compile_rules, sub_text_nodes, chart_sanitize,
-        redact_embedded_xlsx_bytes, HWPX_DISABLE_CACHE
+except Exception:  # pragma: no cover
+    from server.modules.common import (  # type: ignore
+        cleanup_text,
+        compile_rules,
+        sub_text_nodes,
+        chart_sanitize,
+        redact_embedded_xlsx_bytes,
+        HWPX_STRIP_PREVIEW,
+        HWPX_DISABLE_CACHE,
+        HWPX_BLANK_PREVIEW,
     )
 
 try:
     from ..core.schemas import XmlMatch, XmlLocation
 except Exception:
-    from server.core.schemas import XmlMatch, XmlLocation  
+    try:
+        from ..schemas import XmlMatch, XmlLocation   # 일부 브랜치/옛 구조
+    except Exception:
+        from server.core.schemas import XmlMatch, XmlLocation  # 절대경로 fallback
 
 log = logging.getLogger("xml_redaction")
 if not log.handlers:
@@ -26,7 +45,6 @@ if not log.handlers:
 log.setLevel(logging.INFO)
 
 _CURRENT_SECRETS: List[str] = []
-IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp")
 
 
 def set_hwpx_secrets(values: List[str] | None):
@@ -39,16 +57,22 @@ def hwpx_text(zipf: zipfile.ZipFile) -> str:
     out: List[str] = []
     names = zipf.namelist()
 
-    # 본문 (Contents/)
-    for name in sorted(n for n in names if n.lower().startswith("contents/") and n.endswith(".xml")):
+    # 1) 본문 Contents/* 의 텍스트
+    for name in sorted(names):
+        low = name.lower()
+        if not (low.startswith("contents/") and low.endswith(".xml")):
+            continue
         try:
             xml = zipf.read(name).decode("utf-8", "ignore")
             out += [m.group(1) for m in re.finditer(r">([^<>]+)<", xml)]
         except Exception:
-            pass
+            continue
 
-    # 차트 (chart/, charts/)
-    for name in sorted(n for n in names if (n.lower().startswith("chart/") or n.lower().startswith("charts/")) and n.endswith(".xml")):
+    # 2) 차트 Chart(s)/* 의 a:t, c:v 텍스트 (라벨/범주/제목 등)
+    for name in sorted(names):
+        low = name.lower()
+        if not ((low.startswith("chart/") or low.startswith("charts/")) and low.endswith(".xml")):
+            continue
         try:
             s = zipf.read(name).decode("utf-8", "ignore")
             for m in re.finditer(r"<a:t[^>]*>(.*?)</a:t>|<c:v[^>]*>(.*?)</c:v>", s, re.I | re.DOTALL):
@@ -58,7 +82,7 @@ def hwpx_text(zipf: zipfile.ZipFile) -> str:
         except Exception:
             pass
 
-    # BinData/
+    # 3) BinData/*: ZIP(=내장 XLSX)이면 그 안에서도 텍스트 수집
     for name in names:
         low = name.lower()
         if not low.startswith("bindata/"):
@@ -82,9 +106,9 @@ def hwpx_text(zipf: zipfile.ZipFile) -> str:
     return cleanup_text("\n".join(x for x in out if x))
 
 
-# ───────────────────────────────────────
-# /text/extract 에서 사용되는 텍스트 포맷 정리
-# ───────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# /text/extract 용 텍스트 추출 (사람이 보기 좋게 정리)
+# ─────────────────────────────────────────────────────────────────────────────
 def extract_text(file_bytes: bytes) -> dict:
     with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as zipf:
         raw = hwpx_text(zipf)
@@ -96,21 +120,36 @@ def extract_text(file_bytes: bytes) -> dict:
         if re.fullmatch(r"\(?\^\d+[\).\s]*", line.strip()):
             continue
         lines.append(line)
+
     txt = "\n".join(lines)
     txt = re.sub(r"\(\^\d+\)", "", txt)
+
+    # 3) 엑셀 시트/범위 토큰 제거
+    #    예: "Sheet1!$B$1", "Sheet1!$B$2:$B$5"
     txt = re.sub(
         r"Sheet\d*!\$[A-Z]+\$\d+(?::\$[A-Z]+\$\d+)?",
         "",
-        txt, flags=re.IGNORECASE
+        txt,
+        flags=re.IGNORECASE,
     )
+
+    # 4) "General4.3" 같은 포맷 문자열에서 General 제거 → "4.3"
     txt = re.sub(r"General(?=\s*\d)", "", txt, flags=re.IGNORECASE)
+
+    # 5) 공백/줄바꿈 정리
     cleaned = cleanup_text(txt)
-    return {"full_text": cleaned, "pages": [{"page": 1, "text": cleaned}]}
+
+    return {
+        "full_text": cleaned,
+        "pages": [
+            {"page": 1, "text": cleaned},
+        ],
+    }
 
 
-# ───────────────────────────────────────
-# 스캔(민감정보 추출)
-# ───────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 스캔: 정규식 규칙으로 텍스트에서 민감정보 후보를 추출
+# ─────────────────────────────────────────────────────────────────────────────
 def scan(zipf: zipfile.ZipFile) -> Tuple[List[XmlMatch], str, str]:
     text = hwpx_text(zipf)
     comp = compile_rules()
@@ -156,18 +195,25 @@ def scan(zipf: zipfile.ZipFile) -> Tuple[List[XmlMatch], str, str]:
 
             out.append(
                 XmlMatch(
-                    rule=rule, value=val, valid=ok,
-                    context=text[max(0, m.start()-20): m.end()+20],
-                    location=XmlLocation(kind="hwpx", part="*merged_text*", start=m.start(), end=m.end()),
+                    rule=rule_name,
+                    value=val,
+                    valid=ok,
+                    context=text[max(0, m.start() - 20): min(len(text), m.end() + 20)],
+                    location=XmlLocation(
+                        kind="hwpx",
+                        part="*merged_text*",
+                        start=m.start(),
+                        end=m.end(),
+                    ),
                 )
             )
 
     return out, "hwpx", text
 
 
-# ───────────────────────────────────────
-# 레닥션 (파트별 처리)
-# ───────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 파일 단위 레닥션
+# ─────────────────────────────────────────────────────────────────────────────
 def redact_item(filename: str, data: bytes, comp) -> Optional[bytes]:
     low = filename.lower()
     log.info("[HWPX][RED] entry=%s size=%d", filename, len(data))
@@ -176,7 +222,8 @@ def redact_item(filename: str, data: bytes, comp) -> Optional[bytes]:
         if low.endswith(IMAGE_EXTS):
             log.info("[HWPX][IMG] preview image=%s size=%d", filename, len(data))
         return b""
-    
+
+    # 2) settings.xml: 캐시/프리뷰 비활성화
     if HWPX_DISABLE_CACHE and low.endswith("settings.xml"):
         try:
             txt = data.decode("utf-8", "ignore")
@@ -191,29 +238,25 @@ def redact_item(filename: str, data: bytes, comp) -> Optional[bytes]:
         return sub_text_nodes(data, comp)[0]
 
     if (low.startswith("chart/") or low.startswith("charts/")) and low.endswith(".xml"):
-        b2, _ = chart_sanitize(data, comp)
-        return sub_text_nodes(b2, comp)[0]
+        b2, _ = chart_sanitize(data, comp)   # a:t, c:strCache
+        masked, _ = sub_text_nodes(b2, comp)
+        return masked
 
-    if low.startswith("images/") or low.startswith("image/"):
-        if low.endswith(IMAGE_EXTS):
-            log.info("[HWPX][IMG] image=%s size=%d", filename, len(data))
-        return data
-
+    # 5) BinData: 내장 XLSX 또는 OLE(CFBF)
     if low.startswith("bindata/"):
-        log.info("[HWPX][BIN] bindata entry=%s size=%d", filename, len(data))
-        if low.endswith(IMAGE_EXTS):
-            log.info("[HWPX][IMG] bindata image=%s size=%d", filename, len(data))
-
-        if data[:2] == b"PK":
+        # (a) ZIP(=PK..) → 내장 XLSX
+        if len(data) >= 4 and data[:2] == b"PK":
             try:
                 return redact_embedded_xlsx_bytes(data)
             except Exception:
                 return data
+        # (b) 그 외 → CFBF(OLE) 가능. 프리뷰는 무조건 블랭크 + 시크릿/이메일 동일길이 마스킹
         try:
             try:
                 from .ole_redactor import redact_ole_bin_preserve_size
-            except Exception:
-                from server.modules.ole_redactor import redact_ole_bin_preserve_size  
+            except Exception:  # pragma: no cover
+                from server.modules.ole_redactor import redact_ole_bin_preserve_size  # type: ignore
+
             return redact_ole_bin_preserve_size(data, _CURRENT_SECRETS, mask_preview=True)
         except Exception:
             return data
@@ -222,24 +265,3 @@ def redact_item(filename: str, data: bytes, comp) -> Optional[bytes]:
         return sub_text_nodes(data, comp)[0]
 
     return None
-
-
-def extract_images(file_bytes: bytes) -> List[Tuple[str, bytes]]:
-    out: List[Tuple[str, bytes]] = []
-    with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as z:
-        for name in z.namelist():
-            low = name.lower()
-            if not (
-                low.startswith("preview/") or
-                low.startswith("images/") or
-                low.startswith("image/") or
-                low.startswith("bindata/")
-            ):
-                continue
-            if low.endswith(IMAGE_EXTS):
-                try:
-                    out.append((name, z.read(name)))
-                except KeyError:
-                    pass
-    return out
-    

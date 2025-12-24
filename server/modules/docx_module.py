@@ -3,14 +3,16 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+import logging
+import os
+import inspect
 import xml.etree.ElementTree as ET
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Optional
+from typing import List, Tuple
 
-# common 유틸 임포트: 상대 경로 우선, 실패 시 절대 경로 fallback
 try:
     from .common import (
         cleanup_text,
-        cleanup_text_keep_tabs,
         compile_rules,
         sub_text_nodes,
         chart_sanitize,
@@ -19,10 +21,9 @@ try:
         chart_rels_sanitize,
         sanitize_docx_content_types,
     )
-except Exception:  # pragma: no cover 
+except Exception:  # pragma: no cover - 구조가 달라졌을 때 대비
     from server.modules.common import (  # type: ignore
         cleanup_text,
-        cleanup_text_keep_tabs,
         compile_rules,
         sub_text_nodes,
         chart_sanitize,
@@ -32,278 +33,139 @@ except Exception:  # pragma: no cover
         sanitize_docx_content_types,
     )
 
-# schemas 임포트: core 우선, 실패 시 대안 경로 시도
+# ── schemas 임포트: core 우선, 실패 시 대안 경로 시도 ─────────────────────────
 try:
-    from ..core.schemas import XmlMatch, XmlLocation  # 현재 리포 구조
+    from .ocr_image_redactor import redact_image_bytes
 except Exception:
     try:
-        from ..schemas import XmlMatch, XmlLocation   # 옛 구조 호환
+        from server.modules.ocr_image_redactor import redact_image_bytes
+    except Exception:
+        redact_image_bytes = None
+
+
+# 환경변수 bool 파싱 유틸
+def _env_bool(key: str, default: bool) -> bool:
+    v = os.getenv(key)
+    if v is None:
+        return default
+    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+
+def _call_redact_image_bytes(fn, data: bytes, comp, *, filename: str, env_prefix: str, logger, debug: bool):
+    kwargs = {}
+    try:
+        sig = inspect.signature(fn)
+        params = sig.parameters
+        has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+        def _set_kw(key: str, value):
+            if value is None:
+                return
+            if has_varkw or (key in params):
+                kwargs[key] = value
+
+        _set_kw("filename", filename)
+        _set_kw("name", filename)
+        _set_kw("path", filename)
+
+        _set_kw("env_prefix", env_prefix)
+        _set_kw("prefix", env_prefix)
+        _set_kw("env", env_prefix)
+
+        _set_kw("logger", logger)
+        _set_kw("log", logger)
+
+        if debug:
+            _set_kw("debug", True)
+            _set_kw("verbose", True)
+            _set_kw("trace", True)
+
+        comp_kw_name = None
+        for cand in ("comp", "compiled", "compiled_rules", "rules"):
+            if has_varkw or (cand in params):
+                comp_kw_name = cand
+                break
+
+        pos_params = [
+            p for p in params.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        pos_count = len(pos_params)
+
     except Exception:
         from server.core.schemas import XmlMatch, XmlLocation  # 절대경로 fallback
 
-
-def _local(tag: str) -> str:
-    """XML 태그에서 로컬 네임만 추출: '{uri}p' -> 'p'"""
-    if "}" in tag:
-        return tag.rsplit("}", 1)[-1]
-    return tag
-
-
-# DOCX 텍스트 추출 (차트/임베디드 포함)
 def _collect_chart_texts(zipf: zipfile.ZipFile) -> str:
     parts: List[str] = []
 
-    # 1) 차트 XML 내부 라벨/캐시 텍스트
     for name in sorted(
         n for n in zipf.namelist()
         if n.startswith("word/charts/") and n.endswith(".xml")
     ):
-        s = zipf.read(name).decode("utf-8", "ignore")
-        for m in re.finditer(
-            r"<a:t[^>]*>(.*?)</a:t>|<c:v[^>]*>(.*?)</c:v>", s, re.I | re.DOTALL
-        ):
-            v = (m.group(1) or m.group(2) or "")
-            if v:
-                parts.append(v)
+        try:
+            s = zipf.read(name).decode("utf-8", "ignore")
+        except KeyError:
+            continue
 
-    # 2) 임베디드 XLSX 내부의 문자열/시트/차트 텍스트
+        for m in re.finditer(
+            r"<a:t[^>]*>(.*?)</a:t>|<c:v[^>]*>(.*?)</c:v>",
+            s,
+            re.I | re.DOTALL,
+        ):
+            text_part = m.group(1)
+            num_part = m.group(2)
+            v = (text_part or num_part or "").strip()
+            if not v:
+                continue
+            # 숫자값(축 값 등)만 있는 건 제외
+            if num_part is not None and re.fullmatch(r"\d+(\.\d+)?", v):
+                continue
+            parts.append(v)
+
     for name in sorted(
         n for n in zipf.namelist()
         if n.startswith("word/embeddings/") and n.lower().endswith(".xlsx")
     ):
         try:
             xlsx_bytes = zipf.read(name)
+        except KeyError:
+            continue
+
+        try:
             with zipfile.ZipFile(io.BytesIO(xlsx_bytes), "r") as xzf:
                 parts.append(xlsx_text_from_zip(xzf))
-        except KeyError:
-            pass
         except zipfile.BadZipFile:
             continue
 
     return cleanup_text("\n".join(p for p in parts if p))
-
-
-def _escape_html(s: str) -> str:
-    return (
-        str(s)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&#39;")
-    )
-
-
-def _cell_to_html(cell: str) -> str:
-    # 셀 내부 줄바꿈은 <br>로 유지
-    s = (cell or "").replace("\r\n", "\n").replace("\r", "\n")
-    s = _escape_html(s).replace("\n", "<br/>")
-    return s
-
-
-def _rows_to_html_table(rows: List[List[str]]) -> str:
-    if not rows:
-        return ""
-    w = max((len(r) for r in rows), default=0)
-    rect = [list(r) + [""] * (w - len(r)) for r in rows]
-    out: List[str] = []
-    out.append("<table>")
-    out.append("<tbody>")
-    for r in rect:
-        out.append("<tr>")
-        for c in r:
-            out.append(f"<td>{_cell_to_html(c)}</td>")
-        out.append("</tr>")
-    out.append("</tbody>")
-    out.append("</table>")
-    return "\n".join(out)
-
-
-def _document_xml_to_blocks(xml_bytes: bytes) -> List[Dict[str, Any]]:
-    """
-    word/document.xml을 문단/표 블록으로 파싱.
-    - 표는 w:tbl/w:tr/w:tc 구조로 추출하여 2D rows로 유지
-    - 셀 내부 줄바꿈(w:br, w:p 경계)은 그대로 보존
-    """
-    blocks: List[Dict[str, Any]] = []
-
-    try:
-        it = ET.iterparse(io.BytesIO(xml_bytes), events=("start", "end"))
-    except Exception:
-        # 파싱 실패 시: 텍스트만이라도 추출
-        s = xml_bytes.decode("utf-8", "ignore")
-        text_main = "".join(
-            m.group(1) for m in re.finditer(r"<w:t[^>]*>(.*?)</w:t>", s, re.DOTALL)
-        )
-        blocks.append({"type": "p", "text": cleanup_text(text_main)})
-        return blocks
-
-    in_tbl = 0
-    in_tc = 0
-    cur_p: List[str] = []
-    cur_cell_lines: List[str] = []
-    cur_row: List[str] = []
-    cur_table: List[List[str]] = []
-
-    def _flush_para_into_cell():
-        nonlocal cur_p, cur_cell_lines
-        txt = "".join(cur_p)
-        txt = txt.replace("\r\n", "\n").replace("\r", "\n")
-        txt = txt.strip("\n")
-        if txt:
-            cur_cell_lines.append(txt)
-        cur_p = []
-
-    def _flush_para_into_blocks():
-        nonlocal cur_p, blocks
-        txt = "".join(cur_p)
-        txt = txt.replace("\r\n", "\n").replace("\r", "\n")
-        txt = cleanup_text_keep_tabs(txt)
-        if txt.strip():
-            blocks.append({"type": "p", "text": txt})
-        cur_p = []
-
-    for ev, el in it:
-        name = _local(el.tag).lower()
-
-        if ev == "start":
-            if name == "tbl":
-                in_tbl += 1
-                if in_tbl == 1:
-                    cur_table = []
-            elif name == "tr" and in_tbl:
-                if in_tbl == 1:
-                    cur_row = []
-            elif name == "tc" and in_tbl:
-                in_tc += 1
-                if in_tbl == 1 and in_tc == 1:
-                    cur_cell_lines = []
-            elif name == "t":
-                if el.text:
-                    cur_p.append(el.text)
-            elif name == "tab":
-                cur_p.append("\t")
-            elif name == "br":
-                cur_p.append("\n")
-
-        else:  # end
-            if name == "p":
-                if in_tbl and in_tc:
-                    _flush_para_into_cell()
-                else:
-                    _flush_para_into_blocks()
-            elif name == "tc" and in_tbl:
-                # 셀 종료: 셀 내부 문단들을 줄바꿈으로 연결
-                if in_tbl == 1 and in_tc == 1:
-                    cell = "\n".join(cur_cell_lines).strip("\n")
-                    cur_row.append(cell)
-                in_tc = max(0, in_tc - 1)
-            elif name == "tr" and in_tbl:
-                if in_tbl == 1:
-                    if cur_row:
-                        cur_table.append(cur_row)
-                cur_row = []
-            elif name == "tbl":
-                if in_tbl == 1:
-                    if cur_table:
-                        blocks.append({"type": "table", "rows": cur_table})
-                in_tbl = max(0, in_tbl - 1)
-
-            el.clear()
-
-    # 남은 문단 flush(파싱 종료 시점)
-    if cur_p:
-        if in_tbl and in_tc:
-            _flush_para_into_cell()
-        else:
-            _flush_para_into_blocks()
-
-    return blocks
-
-
-def _blocks_to_plain_text(blocks: List[Dict[str, Any]]) -> str:
-    out: List[str] = []
-    for b in blocks:
-        if b.get("type") == "p":
-            t = str(b.get("text") or "")
-            if t.strip():
-                out.append(t)
-        elif b.get("type") == "table":
-            rows = b.get("rows") or []
-            if not isinstance(rows, list):
-                continue
-            for r in rows:
-                if not isinstance(r, list):
-                    continue
-                out.append("\t".join(str(c or "") for c in r))
-        out.append("")  # 블록 간 빈 줄
-    return cleanup_text_keep_tabs("\n".join(out))
-
-
-def _blocks_to_markdown(blocks: List[Dict[str, Any]]) -> str:
-    out: List[str] = []
-    for b in blocks:
-        if b.get("type") == "p":
-            t = str(b.get("text") or "").strip()
-            if t:
-                out.append(_escape_html(t))
-                out.append("")  # 문단 분리
-        elif b.get("type") == "table":
-            rows = b.get("rows") or []
-            if isinstance(rows, list) and rows:
-                out.append(_rows_to_html_table(rows))  # raw HTML table
-                out.append("")
-    # 문단을 escape_html로 넣었기 때문에 HTML로 렌더링됨(줄바꿈은 marked breaks 옵션이 처리)
-    return "\n".join(out).strip()
-
-
 def docx_text(zipf: zipfile.ZipFile) -> str:
-    # 본문(document.xml) - 평문(탐지용)
     try:
         xml_bytes = zipf.read("word/document.xml")
     except KeyError:
         xml_bytes = b""
 
-    blocks = _document_xml_to_blocks(xml_bytes)
-    text_main = _blocks_to_plain_text(blocks)
+    text_main = "".join(
+        m.group(1) for m in re.finditer(r"<w:t[^>]*>(.*?)</w:t>", xml, re.DOTALL)
+    )
+    text_main = cleanup_text(text_main)
 
     # 차트 + 임베디드 XLSX
     text_charts = _collect_chart_texts(zipf)
 
-    return cleanup_text_keep_tabs("\n".join(x for x in [text_main, text_charts] if x))
+    return cleanup_text("\n".join(x for x in [text_main, text_charts] if x))
 
-
-def docx_markdown(zipf: zipfile.ZipFile) -> str:
-    try:
-        xml_bytes = zipf.read("word/document.xml")
-    except KeyError:
-        xml_bytes = b""
-    blocks = _document_xml_to_blocks(xml_bytes)
-    md_main = _blocks_to_markdown(blocks)
-    md_charts = _escape_html(_collect_chart_texts(zipf)) if _collect_chart_texts(zipf) else ""
-    return "\n\n".join(x for x in [md_main, md_charts] if x).strip()
-
-
-# /text/extract, /redactions/xml/scan 에서 사용하는 래퍼
 def extract_text(file_bytes: bytes) -> dict:
-    """
-    DOCX 바이트에서 텍스트만 추출.
-    full_text / pages 형식으로 반환 (HWPX extract_text와 동일 형식).
-    """
     with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as zipf:
         txt = docx_text(zipf)
-        md = docx_markdown(zipf)
-
     return {
         "full_text": txt,
-        "markdown": md if isinstance(md, str) else txt,
         "pages": [
             {"page": 1, "text": txt},
         ],
     }
 
 
-# 스캔: 정규식 규칙으로 텍스트에서 민감정보 후보 추출
 def scan(zipf: zipfile.ZipFile) -> Tuple[List[XmlMatch], str, str]:
     text = docx_text(zipf)
     comp = compile_rules()
@@ -311,14 +173,11 @@ def scan(zipf: zipfile.ZipFile) -> Tuple[List[XmlMatch], str, str]:
 
     for ent in comp:
         try:
-            # tuple/list 계열
             if isinstance(ent, (list, tuple)):
-                if len(ent) >= 2:
-                    rule_name, rx = ent[0], ent[1]
-                else:
+                if len(ent) < 2:
                     continue
+                rule_name, rx = ent[0], ent[1]
             else:
-                # 네임드 객체(SimpleNamespace 등)
                 rule_name = getattr(ent, "name", getattr(ent, "rule", "unknown"))
                 rx = getattr(ent, "rx", getattr(ent, "regex", None))
             if rx is None:
@@ -332,45 +191,116 @@ def scan(zipf: zipfile.ZipFile) -> Tuple[List[XmlMatch], str, str]:
                 XmlMatch(
                     rule=rule_name,
                     value=val,
-                    valid=True,  # DOCX 스캔은 일단 전부 valid로 표시 (레닥션 쪽에서 validator 사용)
+                    valid=True,
                     context=text[max(0, m.start() - 20): min(len(text), m.end() + 20)],
-                    location=XmlLocation(
-                        kind="docx",
-                        part="*merged_text*",
-                        start=m.start(),
-                        end=m.end(),
-                    ),
+                    location=XmlLocation(kind="docx", part="*merged_text*", start=m.start(), end=m.end()),
                 )
             )
 
     return out, "docx", text
 
-
-# 파일 단위 레닥션: 각 파트별로 처리
+─
 def redact_item(filename: str, data: bytes, comp):
     low = filename.lower()
+    log.info(
+        "[DOCX][RED] filename=%s low=%s size=%d",
+        filename,
+        low,
+        len(data) if isinstance(data, (bytes, bytearray)) else -1,
+    )
 
-    # 0) DOCX 루트 컨텐츠 타입 정리
     if low == "[content_types].xml":
         return sanitize_docx_content_types(data)
 
-    # 1) 본문 XML: 텍스트 노드만 마스킹
     if low == "word/document.xml":
         return sub_text_nodes(data, comp)[0]
 
-    # 2) 차트 XML: 라벨/캐시 + 텍스트 노드 마스킹
     if low.startswith("word/charts/") and low.endswith(".xml"):
         b2, _ = chart_sanitize(data, comp)
         return sub_text_nodes(b2, comp)[0]
 
-    # 3) 차트 RELS
-    if low.startswith("word/charts/_rels/") and low.endswith(".rels"):
-        b2, _ = chart_rels_sanitize(data)
-        return b2
-
-    # 4) 임베디드 XLSX
     if low.startswith("word/embeddings/") and low.endswith(".xlsx"):
         return redact_embedded_xlsx_bytes(data)
 
-    # 5) 기타 파트는 그대로
+    if low.startswith("word/media/") and low.endswith(IMAGE_EXTS):
+        log.info("[DOCX][IMG] image=%s size=%d", filename, len(data))
+
+        if not _env_bool("DOCX_OCR_IMAGES", True):
+            log.info("[DOCX][IMG][OCR] 비활성화됨(DOCX_OCR_IMAGES=0) image=%s", filename)
+            return data
+
+        if redact_image_bytes is None:
+            log.warning("[DOCX][IMG][OCR] ocr_image_redactor 없음 -> 스킵(%s)", filename)
+            return data
+
+        debug = _env_bool("DOCX_OCR_DEBUG", False)
+
+        log.info(
+            "[DOCX][IMG][OCR] start image=%s size=%d debug=%s",
+            filename,
+            len(data),
+            debug,
+        )
+
+        try:
+            red, hit = _call_redact_image_bytes(
+                redact_image_bytes,
+                data,
+                comp,
+                filename=filename,
+                env_prefix="DOCX",
+                logger=log,
+                debug=debug,
+            )
+
+            changed = (red != data)
+            log.info(
+                "[DOCX][IMG][OCR] end image=%s in=%d out=%d changed=%s hit=%s",
+                filename,
+                len(data),
+                len(red) if isinstance(red, (bytes, bytearray)) else -1,
+                changed,
+                hit,
+            )
+
+            if hit == -1:
+                if changed:
+                    log.info("[DOCX][IMG][OCR] 변경됨=%s (hit 카운트 없음, 바이트만 변경)", filename)
+                else:
+                    log.info("[DOCX][IMG][OCR] 변경없음=%s (hit 카운트 없음, 바이트 동일)", filename)
+            else:
+                if hit > 0:
+                    log.info("[DOCX][IMG][OCR] 마스킹됨=%s hits=%d", filename, hit)
+                else:
+                    log.info("[DOCX][IMG][OCR] 매칭없음=%s hits=%d", filename, hit)
+
+            return red
+
+        except Exception as e:
+            log.exception("[DOCX][IMG][OCR] 실패 image=%s err=%r", filename, e)
+            return data
+
     return data
+
+
+def extract_images(file_bytes: bytes) -> List[Tuple[str, bytes]]:
+    out: List[Tuple[str, bytes]] = []
+    with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as zipf:
+        names = zipf.namelist()
+        log.info("[DOCX][IMG-EXTRACT] entries=%d", len(names))
+
+        for name in names:
+            low = name.lower()
+            if not low.startswith("word/media/"):
+                continue
+            if not low.endswith(IMAGE_EXTS):
+                continue
+            try:
+                data = zipf.read(name)
+            except KeyError:
+                continue
+            out.append((name, data))
+            log.info("[DOCX][IMG-EXTRACT] name=%s size=%d", name, len(data))
+
+    log.info("[DOCX][IMG-EXTRACT] total=%d", len(out))
+    return out

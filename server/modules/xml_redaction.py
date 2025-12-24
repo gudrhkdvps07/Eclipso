@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import fitz
 from fastapi import HTTPException
 
-# XmlScanResponse 임포트 (core 우선, 실패 시 대안 경로)
 try:
     from ..core.schemas import XmlScanResponse
 except Exception:
@@ -77,75 +76,6 @@ def _collect_hwpx_secrets(zin: zipfile.ZipFile) -> List[str]:
                 secrets.append(v)
     return secrets
 
-
-def _ner_entities_to_extra_comp(
-    ner_entities: Optional[List[Any]],
-    ner_allowed: Optional[List[str]] = None,
-    masking_policy: Optional[Dict[str, Any]] = None,
-) -> List[Tuple[str, re.Pattern, bool, int, Optional[object]]]:
-    if not isinstance(ner_entities, list) or not ner_entities:
-        return []
-
-    allow_set: Optional[Set[str]] = None
-    if isinstance(ner_allowed, list) and ner_allowed:
-        allow_set = {str(x).strip().upper() for x in ner_allowed if str(x).strip()}
-
-    max_n = int(os.getenv("XML_NER_MAX_PATTERNS", "500") or "500")
-    min_len = int(os.getenv("XML_NER_MIN_TEXT_LEN", "2") or "2")
-
-    seen: Set[str] = set()
-    out: List[Tuple[str, re.Pattern, bool, int, Optional[object]]] = []
-
-    ps_mode = str((masking_policy or {}).get("ps") or "full")
-
-    for ent in ner_entities:
-        if not isinstance(ent, dict):
-            continue
-
-        lab = str(ent.get("label") or ent.get("entity_group") or ent.get("entity") or "").strip().upper()
-        if allow_set is not None and lab and lab not in allow_set:
-            continue
-
-        txt = str(ent.get("text") or "")
-        txt_strip = txt.strip()
-
-        # PS: 성(첫 글자)만 남기기 옵션이면, 엔티티 전체가 아니라 "이름 부분"만 추가 패턴으로 넣는다.
-        if lab == "PS" and ps_mode == "keep_first_char":
-            t = txt_strip
-            # 한글 이름(공백 없는)만 대상으로 단순 처리
-            if re.fullmatch(r"[\uAC00-\uD7A3]+", t or ""):
-                if len(t) <= 1:
-                    continue
-                txt = t[1:]
-                txt_strip = txt.strip()
-
-        txt = txt_strip
-        if not txt or len(txt) < min_len:
-            continue
-
-        if txt in seen:
-            continue
-        seen.add(txt)
-
-        # 너무 많이 추가되면 속도/메모리 부담 → 상한
-        if max_n > 0 and len(out) >= max_n:
-            break
-
-        rule_name = f"NER_{lab}" if lab else "NER"
-        try:
-            rx = re.compile(re.escape(txt))
-        except re.error:
-            continue
-
-        # need_valid=False, prio는 낮게(정규식 룰보다 보통 뒤)
-        out.append((rule_name, rx, False, 1, None))
-
-    if out:
-        log.info("XML redact: extra NER patterns=%d (allowed=%s)", len(out), allow_set)
-    return out
-
-
-# LibreOffice 실행 파일 탐색
 def _find_soffice() -> Optional[str]:
     candidates = [
         shutil.which("soffice"),
@@ -259,23 +189,8 @@ def _rewrite_zip_replacing_previews(
         os.path.basename(dst_path),
     )
 
-
-def xml_redact_to_file(
-    src_path: str,
-    dst_path: str,
-    filename: str,
-    ner_entities: Optional[List[Any]] = None,
-    ner_allowed: Optional[List[str]] = None,
-    masking_policy: Optional[Dict[str, Any]] = None,
-) -> None:
-    # XML 포맷 레닥션 → 파일 저장
-    base_comp = compile_rules()
-    extra_comp = _ner_entities_to_extra_comp(
-        ner_entities,
-        ner_allowed=ner_allowed,
-        masking_policy=masking_policy,
-    )
-    comp = base_comp + extra_comp
+def xml_redact_to_file(src_path: str, dst_path: str, filename: str) -> None:
+    comp = compile_rules()
     kind = detect_xml_type(filename)
     log.info("XML redact: file=%s kind=%s", filename, kind)
 

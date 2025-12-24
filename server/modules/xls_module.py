@@ -28,6 +28,7 @@ def iter_biff_records(data: bytes):
         opcode, length = struct.unpack_from("<HH", data, off)
         header_off = off
         off += 4
+        
         payload = data[off:off + length]
         off += length
         yield opcode, length, payload, header_off
@@ -92,10 +93,7 @@ def _parse_boundsheets(wb: bytes) -> List[Tuple[str, int]]:
         name_len = payload[6]
         flags = payload[7]
         name_bytes = payload[8:8 + (name_len * (2 if (flags & 0x01) else 1))]
-        try:
-            if flags & 0x01:
-                name = name_bytes.decode("utf-16le", errors="ignore")
-            else:
+        try:     else:
                 name = name_bytes.decode("latin1", errors="ignore")
         except Exception:
             name = f"Sheet@{off}"
@@ -117,10 +115,7 @@ def _extract_sheet_grid(wb: bytes, strings: List[str], sheet_off: int, max_rows:
         try:
             if opcode == LABELSST and len(payload) >= 10:
                 r = le16(payload, 0)
-                c = le16(payload, 2)
-                if r + 1 > max_rows or c + 1 > max_cols:
-                    continue
-                sst_idx = le32(payload, 6)
+                c = le16(payload, 2)         sst_idx = le32(payload, 6)
                 v = strings[sst_idx] if 0 <= sst_idx < len(strings) else ""
                 if v:
                     cells.setdefault(r + 1, {})[c + 1] = v
@@ -179,10 +174,7 @@ def extract_markdown_tables_from_xls(file_bytes: bytes) -> str:
 
     blocks = get_sst_blocks(wb)
     if blocks:
-        xlucs_list = SSTParser(blocks).parse()
-        strings = [x.text for x in xlucs_list]
-    else:
-        strings = []
+        xlucs_list = SSTParser(blocks).parse() strings = []
 
     sheets = _parse_boundsheets(wb)
     if not sheets:
@@ -466,7 +458,7 @@ def extract_text_from_xls(file_bytes: bytes) -> dict:
 
             wb = ole.openstream("Workbook").read()
 
-        # SST 문자열 리스트 만들기
+
         blocks = get_sst_blocks(wb)
         if blocks:
             xlucs_list = SSTParser(blocks).parse()
@@ -615,11 +607,7 @@ def redact_hdr_fdr(wb: bytearray) -> None:
 
 
 
-#OLE 파일 교체
-def overlay_workbook_stream(file_bytes: bytes, orig_wb: bytes, new_wb: bytes) -> bytes:
-    full = bytearray(file_bytes)
-
-    # workbook 스트림의 위치를 전체 OLE 파일에서 찾음
+#orkbook 스트림의 위치를 전체 OLE 파일에서 찾음
     pos = full.find(orig_wb)
     if pos == -1:
         print("[WARN] workbook 스트림을 전체 파일에서 찾기 실패")
@@ -701,8 +689,7 @@ def redact(file_bytes: bytes, spans: Optional[List[Dict[str, Any]]] = None) -> b
         return file_bytes
     uniq: List[str] = []
     seen: Set[str] = set()
-    for s in sorted(secrets, key=lambda x: (-len(x), x)):
-        if s not in seen:
+    for s in sorted(secrets, key=lambda x: (
             seen.add(s)
             uniq.append(s)
 
@@ -714,3 +701,13 @@ def redact(file_bytes: bytes, spans: Optional[List[Dict[str, Any]]] = None) -> b
 def extract_text(file_bytes: bytes) -> dict:
     """text_api.py 에서 호출되는 공통 인터페이스"""
     return extract_text_from_xls(file_bytes)
+
+            wb[pos] = raw[i]
+
+    print("[OK] SST 텍스트 레닥션 완료")
+
+    redact_hdr_fdr(wb)
+    print("[OK] 헤더/푸터 텍스트 레닥션 완료")
+
+    return overlay_workbook_stream(file_bytes, orig_wb, bytes(wb))
+>>>>>>> origin/main
