@@ -171,7 +171,7 @@ def _call_redact_image_bytes(fn, data: bytes, comp, *, filename: str, env_prefix
 
 
 # XLSX 텍스트 추출
-def xlsx_text(zipf: zipfile.ZipFile) -> str
+def xlsx_text(zipf: zipfile.ZipFile) -> str:
     return xlsx_text_from_zip(zipf)
 
 

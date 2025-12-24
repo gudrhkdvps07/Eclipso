@@ -97,7 +97,10 @@ def _parse_boundsheets(wb: bytes) -> List[Tuple[str, int]]:
         name_len = payload[6]
         flags = payload[7]
         name_bytes = payload[8:8 + (name_len * (2 if (flags & 0x01) else 1))]
-        try:     else:
+        try:
+            if flags & 0x01:
+                name = name_bytes.decode("utf-16le", errors="ignore")
+            else:
                 name = name_bytes.decode("latin1", errors="ignore")
         except Exception:
             name = f"Sheet@{off}"
@@ -117,7 +120,8 @@ def _extract_sheet_grid(wb: bytes, strings: List[str], sheet_off: int, max_rows:
         try:
             if opcode == LABELSST and len(payload) >= 10:
                 r = le16(payload, 0)
-                c = le16(payload, 2)         sst_idx = le32(payload, 6)
+                c = le16(payload, 2)
+                sst_idx = le32(payload, 6)
                 v = strings[sst_idx] if 0 <= sst_idx < len(strings) else ""
                 if v:
                     cells.setdefault(r + 1, {})[c + 1] = v
@@ -173,7 +177,10 @@ def extract_markdown_tables_from_xls(file_bytes: bytes) -> str:
 
     blocks = get_sst_blocks(wb)
     if blocks:
-        xlucs_list = SSTParser(blocks).parse() strings = []
+        xlucs_list = SSTParser(blocks).parse()
+        strings = [x.text for x in xlucs_list]
+    else:
+        strings = []
 
     sheets = _parse_boundsheets(wb)
     if not sheets:
