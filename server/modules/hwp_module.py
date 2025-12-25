@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import zlib
 import struct
+import re
 from typing import List, Tuple, Optional, Dict, Any
 import olefile
 
@@ -23,7 +24,6 @@ def MAKE_4CHID(a, b, c, d) -> int:
     return (a | (b << 8) | (c << 16) | (d << 24))
 
 CTRLID_OLE = MAKE_4CHID(ord('$'), ord('o'), ord('l'), ord('e'))
-
 
 
 # ─────────────────────────────
@@ -200,7 +200,7 @@ def parse_bindata_id_from_ctrldata(payload: bytes) -> Optional[int]:
 
 
 # $ole 컨트롤 기반 BinDataID 탐색
-def discover_ole_bindata_ids_strict(section_bytes: bytes) -> List[int]:
+def discover_ole_ids(section_bytes: bytes) -> List[int]:
     ids: List[int] = []
     pending: Optional[int] = None
 
@@ -218,6 +218,118 @@ def discover_ole_bindata_ids_strict(section_bytes: bytes) -> List[int]:
 
     return ids
 
+# ─────────────────────────────
+# 이미지 추출
+# ─────────────────────────────
+IMAGE_EXTS = (".bmp", ".gif", ".jpg", ".jpeg",".pcx", ".pic", ".png", ".tif", ".tiff")
+
+# HWP 본문 텍스트에 섞여 나오는 제어문자/쓰레기 유니코드 제거(줄바꿈/탭은 유지)
+_CTRL_CHARS = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
+_SPACE_RUN = re.compile(r"[ \u00A0\u2007\u202F]{2,}")
+_TRAIL_SPACE = re.compile(r"[ \t]+$")
+
+def _is_allowed_hwp_char(ch: str) -> bool:
+    """
+    HWP TAG_PARA_TEXT는 텍스트 외 데이터가 섞여 나오는 경우가 있어,
+    한글/영문/숫자/일반 구두점/이메일 기호 중심으로 화이트리스트 적용.
+    """
+    if not ch:
+        return False
+    o = ord(ch)
+    if ch in ("\n", "\t", " "):
+        return True
+    # ASCII printable
+    if 0x21 <= o <= 0x7E:
+        return True
+    # Hangul syllables + jamo (한글)
+    if 0xAC00 <= o <= 0xD7A3:
+        return True
+    if 0x1100 <= o <= 0x11FF:
+        return True
+    if 0x3130 <= o <= 0x318F:
+        return True
+    # (선택) 원화기호/중점 등 문서에서 흔한 기호
+    if o in (0x20A9, 0x00B7):
+        return True
+    return False
+
+def _clean_hwp_text(s: str) -> str:
+    if not s:
+        return ""
+
+    # CR은 LF로 통일
+    s = s.replace("\r", "\n")
+
+    # 1) 제어문자 제거 (LF/TAB은 유지)
+    s = _CTRL_CHARS.sub("", s)
+
+    # 2) 허용 문자만 보존, 나머지는 공백으로 치환(이메일 같은 경우 단어가 붙는 걸 방지)
+    out_chars: List[str] = []
+    for ch in s:
+        out_chars.append(ch if _is_allowed_hwp_char(ch) else " ")
+    s2 = "".join(out_chars)
+
+    # 3) 공백 정리 (줄 단위 trailing 제거 + 연속 공백 축약)
+    lines: List[str] = []
+    for raw in s2.split("\n"):
+        raw = _SPACE_RUN.sub(" ", raw)
+        raw = _TRAIL_SPACE.sub("", raw)
+        # 쓰레기만 남은 라인 제거(문자/숫자/한글/@ 없는 경우 드랍)
+        stripped = raw.strip()
+        if not stripped:
+            lines.append("")
+            continue
+        has_signal = any(
+            ("0" <= c <= "9") or ("A" <= c <= "Z") or ("a" <= c <= "z") or (c == "@") or ("\uAC00" <= c <= "\uD7A3")
+            for c in stripped
+        )
+        if not has_signal:
+            lines.append("")
+            continue
+        lines.append(stripped)
+
+    # 연속 빈 줄 축약(최대 1줄)
+    cleaned_lines: List[str] = []
+    prev_blank = False
+    for ln in lines:
+        is_blank = (ln.strip() == "")
+        if is_blank and prev_blank:
+            continue
+        cleaned_lines.append(ln)
+        prev_blank = is_blank
+
+    return "\n".join(cleaned_lines).strip()
+
+def extract_bindata_images(file_bytes: bytes) -> list[dict]:
+    results = []
+
+    with olefile.OleFileIO(io.BytesIO(file_bytes)) as ole:
+        for path in ole.listdir(streams=True, storages=False):
+            # BinData/<stream>
+            if len(path) != 2 or path[0] != "BinData":
+                continue
+
+            name = path[1]
+            lower = name.lower()
+
+            if not lower.endswith(IMAGE_EXTS):
+                continue
+
+            try:
+                raw = ole.openstream(path).read()
+            except Exception:
+                continue
+
+            results.append({
+                "stream_path": tuple(path),
+                "filename": name,
+                "ext": lower[lower.rfind("."):],
+                "bytes": raw,
+            })
+
+    return results
+
+
 
 # ─────────────────────────────
 # 문자 추출
@@ -234,9 +346,11 @@ def extract_text(file_bytes: bytes) -> dict:
             dec, _ = _decompress(ole.openstream(path).read())
             for tag, _, payload, _, _ in iter_hwp_records(dec):
                 if tag == TAG_PARA_TEXT:
-                    texts.append(payload.decode("utf-16le", "ignore"))
+                    texts.append(_clean_hwp_text(payload.decode("utf-16le", "ignore")))
 
-    full = "\n".join(texts)
+    # TAG_PARA_TEXT는 문단 단위 텍스트 조각이므로, 문단 경계를 '\n'으로 보존한다.
+    # (그대로 이어붙이면 NER 입력에서 레이아웃/문맥이 사라져 탐지 품질이 떨어질 수 있음)
+    full = "\n".join(t for t in texts if t is not None)
     return {"full_text": full, "pages": [{"page": 1, "text": full}]}
 
 
@@ -303,7 +417,7 @@ def try_patterns(blob: bytes, text: str, max_log: int = 0):
 
 
 # ─────────────────────────────
-# BinData 처리
+# BinData - OLE 처리
 # ─────────────────────────────
 CFB = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"
 PNG = b"\x89PNG\r\n\x1a\n"
@@ -439,13 +553,35 @@ def _replace_in_bindata_smart(raw: bytes) -> Tuple[bytes, int]:
 # ─────────────────────────────
 # 레닥션 메인
 # ─────────────────────────────
-def redact(file_bytes: bytes) -> bytes:
+def redact(file_bytes: bytes, spans: Optional[List[Dict[str, Any]]] = None) -> bytes:
     container = bytearray(file_bytes)
 
     full_raw = extract_text(file_bytes)["full_text"]
     full_norm = normalization_text(full_raw)
     targets = _collect_targets_by_regex(full_norm)
 
+    # NER spans에서 텍스트 추출하여 targets에 추가
+    if spans:
+        for span in spans:
+            if not isinstance(span, dict):
+                continue
+            s = span.get("start")
+            e = span.get("end")
+            if s is None or e is None:
+                continue
+            try:
+                s = int(s)
+                e = int(e)
+            except Exception:
+                continue
+            if e <= s or s < 0 or e > len(full_raw):
+                continue
+            target_text = full_raw[s:e]
+            if target_text and target_text.strip():
+                targets.append(target_text)
+    
+    # 중복 제거 및 정렬
+    targets = sorted(set(targets), key=lambda x: (-len(x), x))
 
     print(f"[DBG] sensitive targets = {targets}")
 
