@@ -5,24 +5,36 @@ from server.core.normalize import normalization_index
 from server.core.matching import find_sensitive_spans
 from server.modules.ocr_image_redactor import redact_image_bytes
 
+# BIFF 구조 제어 레코드
+BOF = 0x0809 
+EOF = 0x000A 
 
-SST = 0x00FC
-CONTINUE = 0x003C
-LABELSST = 0x00FD
-HEADER = 0x0014
-FOOTER = 0x0015
-HEADERFOOTER = 0x089C
+# 셀 값 관련 레코드
 LABEL = 0x00FD
-BOF = 0x0809
-EOF = 0x000A
-BOUNDSHEET = 0x0085
-CODEPAGE = 0x0042
 NUMBER = 0x0203
 RK = 0x027E
 MULRK = 0x00BD
 BOOLERR = 0x0205
 FORMULA = 0x0006
+
+# 시트 정보 관련 레코드
+BOUNDSHEET = 0x0085
+CODEPAGE = 0x0042
+
+# 문자열 / 텍스트 관련 레코드
+SST = 0x00FC 
+CONTINUE = 0x003C
+LABELSST = 0x00FD 
+
+# 헤더/푸터 관련 레코드
+HEADER = 0x0014
+FOOTER = 0x0015
+HEADERFOOTER = 0x089C
+
+# 이미지 관련 레코드
 MSODRAWINGGROUP = 0x00EB
+
+# 텍스트박스 관련 레코드
 MSODRAWING = 0x00EC
 OBJ        = 0x005D
 TXO = 0x01B6
@@ -36,6 +48,7 @@ def le32(b, off=0) -> int:
     return struct.unpack_from("<I", b, off)[0]
 
 
+# BIFF 레코드 순회 제너레이터
 def iter_biff_records(data: bytes):
     off, n = 0, len(data)
     while off + 4 <= n:
@@ -46,8 +59,8 @@ def iter_biff_records(data: bytes):
         off += length
         yield opcode, length, payload, header_off
 
-
-def iter_biff_records_from(data: bytes, start_off: int):
+# BIFF 레코드 순회 제너레이터 (특정 오프셋부터)
+def iter_biff_records_from_offset(data: bytes, start_off: int):
     off, n = int(start_off), len(data)
     while off + 4 <= n:
         opcode, length = struct.unpack_from("<HH", data, off)
@@ -119,7 +132,7 @@ def _extract_sheet_grid(wb: bytes, strings: List[str], sheet_off: int, max_rows:
     max_r = 0
     max_c = 0
 
-    for opcode, length, payload, hdr in iter_biff_records_from(wb, sheet_off):
+    for opcode, length, payload, hdr in iter_biff_records_from_offset(wb, sheet_off):
         if opcode == EOF:
             break
         try:
