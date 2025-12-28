@@ -7,9 +7,3 @@ __pycache__/
 # 문서파일 ignore
 근희함.doc
 test.doc
-<<<<<<< HEAD
-=======
-
-# NER 모듈 ignore
-ner/
->>>>>>> origin/xls_demo
