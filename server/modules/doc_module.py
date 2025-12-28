@@ -1,8 +1,4 @@
-import io
-import os
-import re
-import struct
-import tempfile
+import io, os, re, struct, tempfile
 import olefile
 from typing import List, Dict, Any, Tuple, Optional
 
@@ -11,12 +7,23 @@ from server.core.matching import find_sensitive_spans
 from server.modules.doc_chart import redact_workbooks, extract_chart_text
 
 
+_OLE_MAGIC = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"
+_FREESECT = 0xFFFFFFFF
+_ENDOFCHAIN = 0xFFFFFFFE
+_FATSECT = 0xFFFFFFFD
+_DIFSECT = 0xFFFFFFFC
+
+
 # 리틀엔디언 헬퍼
 def le16(b: bytes, off: int) -> int:
     return struct.unpack_from("<H", b, off)[0]
 
 def le32(b: bytes, off: int) -> int:
     return struct.unpack_from("<I", b, off)[0]
+
+
+def le64(buf: bytes, off: int) -> int:
+    return struct.unpack_from("<Q", buf, off)[0]
 
 
 # Word 구조 읽기
@@ -125,10 +132,8 @@ def extract_text(file_bytes: bytes) -> dict:
 
         # Chart 텍스트 합치기
         chart_texts = extract_chart_text(file_bytes)
-        print("=== [DEBUG] chart_texts ===", chart_texts)  #디버깅용
 
         if chart_texts:
-            print(f"[INFO] extracted {len(chart_texts)} chart texts")
             raw_text = raw_word_text + "\n" + "\n".join(chart_texts)
         else:
             raw_text = raw_word_text
@@ -144,8 +149,6 @@ def extract_text(file_bytes: bytes) -> dict:
     except Exception as e:
         print(f"[ERR] DOC 추출 중 예외: {e}")
         return {"full_text": "", "raw_text": "", "pages": [{"page": 1, "text": ""}]}
-
-
 
 
 # 탐지 span 보정(분리)
@@ -167,50 +170,13 @@ def split_matches(matches, text):
     return new_matches
 
 
-
-def _mask_keep_rules(v: str) -> str:
-    out = []
-    for ch in v:
-        if ch == '-':
-            out.append(ch)
-        elif ch.isalnum() or ch in '._':
-            out.append('*')
-        else:
-            out.append(ch)
-    return ''.join(out)
-
-
-def _mask_email(v: str) -> str:
-    out = []
-    in_entity = False
-    for ch in v:
-        if ch == '&':
-            in_entity = True
-            out.append(ch)
-            continue
-        if in_entity:
-            out.append(ch)
-            if ch == ';':
-                in_entity = False
-            continue
-
-        if ch in ('@', '-'):
-            out.append(ch)
-        else:
-            out.append('*')
-    return ''.join(out)
-
-
-def _mask_value(rule: str, v: str) -> str:
-    r = (rule or '').lower()
-    if r == 'email' or 'email' in r:
-        return _mask_email(v)
-    return _mask_keep_rules(v)
+# -과 @를 제외한 민감 문자열을 *로 마스킹
+def mask_except_hypen_at(orig_segment: str) -> str:
+    return "".join(ch if ch in "-@" else "*" for ch in orig_segment)
 
 
 # Word 본문 레닥션
 def replace_text(file_bytes: bytes, targets: list[tuple[int, int, str]], replacement_char: str = "*") -> bytes:
-
     try:
         word_data, table_data = read_streams(file_bytes)
         if not word_data or not table_data:
@@ -246,47 +212,23 @@ def replace_text(file_bytes: bytes, targets: list[tuple[int, int, str]], replace
                 seg_bytes = bytes(replaced[byte_start:byte_start + byte_len])
                 if bpc == 2:
                     seg_text = seg_bytes.decode("utf-16le", errors="replace")
-                    masked_text = _mask_value(rule, seg_text)
+                    masked_text = mask_except_hypen_at(seg_text)
                     masked_bytes = masked_text.encode("utf-16le")
+                    fill = replacement_char.encode("utf-16le")[:2]
                 else:
                     seg_text = seg_bytes.decode("latin-1", errors="replace")
-                    masked_text = _mask_value(rule, seg_text)
+                    masked_text = mask_except_hypen_at(seg_text)
                     masked_bytes = masked_text.encode("latin-1", errors="replace")
+                    fill = replacement_char.encode("latin-1")[:1]
 
-                # 길이가 달라지면 기존 방식(전부 마스킹)으로 폴백
+                # 길이 불일치 시 동일 길이 강제 마스킹
                 if len(masked_bytes) != byte_len:
-                    mask = (
-                        replacement_char.encode("utf-16le")[:2] * (byte_len // 2)
-                        if bpc == 2
-                        else replacement_char.encode("latin-1")[:1] * byte_len
-                    )
-                    replaced[byte_start:byte_start + byte_len] = mask
-                else:
-                    replaced[byte_start:byte_start + byte_len] = masked_bytes
+                    masked_bytes = fill * (byte_len // len(fill))
 
         return create_new_ole_file(file_bytes, bytes(replaced))
     except Exception as e:
         print(f"[ERR] 텍스트 치환 중 오류: {e}")
         return file_bytes
-
-
-_OLE_MAGIC = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"
-_FREESECT = 0xFFFFFFFF
-_ENDOFCHAIN = 0xFFFFFFFE
-_FATSECT = 0xFFFFFFFD
-_DIFSECT = 0xFFFFFFFC
-
-
-def _u16(buf: bytes, off: int) -> int:
-    return struct.unpack_from("<H", buf, off)[0]
-
-
-def _u32(buf: bytes, off: int) -> int:
-    return struct.unpack_from("<I", buf, off)[0]
-
-
-def _u64(buf: bytes, off: int) -> int:
-    return struct.unpack_from("<Q", buf, off)[0]
 
 
 def _sect_off(sector: int, sector_size: int) -> int:
@@ -322,13 +264,13 @@ def _collect_fat_sectors(data: bytes, sector_size: int) -> List[int]:
     # DIFAT header entries: 109 * 4 bytes starting at 0x4C
     fat_sectors: List[int] = []
     for i in range(109):
-        v = _u32(data, 0x4C + i * 4)
+        v = le32(data, 0x4C + i * 4)
         if v in (_FREESECT, _ENDOFCHAIN):
             continue
         fat_sectors.append(int(v))
 
-    difat_start = _u32(data, 0x44)
-    num_difat = _u32(data, 0x48)
+    difat_start = le32(data, 0x44)
+    num_difat = le32(data, 0x48)
 
     if difat_start in (_FREESECT, _ENDOFCHAIN) or num_difat == 0:
         return fat_sectors
@@ -376,7 +318,7 @@ def _read_stream_from_chain(data: bytes, sector_size: int, fat: List[int], start
 
 def _find_dir_entry(data: bytes, sector_size: int, fat: List[int], name: str) -> Optional[Tuple[int, int]]:
     # returns (start_sector, size) for a stream
-    dir_start = _u32(data, 0x30)
+    dir_start = le32(data, 0x30)
     if dir_start in (_FREESECT, _ENDOFCHAIN):
         return None
 
@@ -388,15 +330,15 @@ def _find_dir_entry(data: bytes, sector_size: int, fat: List[int], name: str) ->
     for off in range(0, len(dir_raw) - 128 + 1, 128):
         ent = dir_raw[off : off + 128]
         try:
-            name_len = _u16(ent, 64)
+            name_len = le16(ent, 64)
             if name_len < 2 or name_len > 64:
                 continue
             nm = ent[: name_len - 2].decode("utf-16le", errors="ignore").rstrip("\x00")
             if nm != target:
                 continue
             # stream start sector + size
-            start_sector = _u32(ent, 116)
-            size = _u64(ent, 120)
+            start_sector = le32(ent, 116)
+            size = le64(ent, 120)
             return int(start_sector), int(size)
         except Exception:
             continue
@@ -408,7 +350,7 @@ def _overwrite_stream_in_ole(original_file_bytes: bytes, stream_name: str, new_s
     if len(data) < 512 or data[:8] != _OLE_MAGIC:
         return original_file_bytes
 
-    sector_shift = _u16(data, 0x1E)
+    sector_shift = le16(data, 0x1E)
     sector_size = 1 << int(sector_shift)
     if sector_size not in (512, 1024, 2048, 4096):
         return original_file_bytes
@@ -445,7 +387,6 @@ def _overwrite_stream_in_ole(original_file_bytes: bytes, stream_name: str, new_s
 
 
 def create_new_ole_file(original_file_bytes: bytes, new_word_data: bytes) -> bytes:
-
     try:
         return _overwrite_stream_in_ole(original_file_bytes, "WordDocument", new_word_data)
     except Exception as e:
