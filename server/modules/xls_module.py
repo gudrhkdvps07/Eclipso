@@ -1,4 +1,4 @@
-import io, os, struct, tempfile, olefile
+import io, re, os, struct, tempfile, olefile
 from typing import List, Dict, Any, Tuple, Optional, Set
 
 from server.core.normalize import normalization_index
@@ -1027,14 +1027,54 @@ def redact_textbox(wb: bytearray, extra_literals: Optional[List[str]] = None) ->
         if not text:
             continue
 
-        red = redact_xlucs(text, extra_literals=extra_literals) # NER / literal 기반 레닥션 (추후 필요하면 처리)
-        red = mask_except_hypen_at(red)
+        # 민감 구간 탐지
+        spans = find_sensitive_spans(text)
 
+        if not spans:
+            continue
+
+        # 문자 단위 리스트로 변환
+        chars = list(text)
+
+        # span 구간만 마스킹
+        for s, e, _, _ in spans:
+            masked = mask_except_hypen_at(text[s:e])
+            chars[s:e] = masked
+
+        red = "".join(chars)
+
+        # TxO에 다시 기록
         raw = encode_masked_text(red, fHigh)
-
         for i, p in enumerate(positions):
             wb[p] = raw[i]
 
+
+# Header/Footer 제어코드 정규식
+HEADER_FOOTER_CONTROL_RE = re.compile(
+    r"""
+    &(
+        [LCR]                           |  # section markers
+        [PNDTGZFA]                      |  # page/date/time/path/sheet/file/picture
+        [BIUESXY]                      |  # style toggles
+        \d{1,3}                        |  # font size
+        "(?:[^"]*)"                       # font name/type
+    )
+    |
+    &(?!&) .?                             # empty token (& or &X, but not &&)
+    """,
+    re.VERBOSE | re.UNICODE
+)
+
+# Header/Footer 제어코드 제거
+def strip_hdrfdr_controls(text: str) -> str:
+    if not text:
+        return text
+
+    # && → &
+    text = text.replace("&&", "&")
+
+    # 제어코드만 제거
+    return HEADER_FOOTER_CONTROL_RE.sub("", text).strip()
 
 
 def extract_text(file_bytes: bytes):
@@ -1073,6 +1113,7 @@ def extract_text(file_bytes: bytes):
         # 전체 합치기
         combined_texts = body + header_texts + textbox_texts
         full_text = "\n".join(combined_texts)
+        full_text = strip_hdrfdr_controls(full_text)
 
         md = extract_markdown_tables_from_xls(file_bytes)
 
